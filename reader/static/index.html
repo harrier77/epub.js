@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lettore EPUB</title>
+  <!-- JSZip va caricato PRIMA di epub.js: il build lo tratta come dipendenza esterna -->
+  <script src="/jszip.min.js"></script>
+  <script src="/epub.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #2b2b2b;
+      color: #eee;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: #3a3a3a;
+      border-bottom: 1px solid #555;
+      flex-shrink: 0;
+    }
+    #toolbar button {
+      background: #555;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    #toolbar button:hover { background: #666; }
+    #toolbar button:disabled { opacity: .4; cursor: default; }
+    #title { flex: 1; text-align: center; font-weight: 600; overflow: hidden;
+             white-space: nowrap; text-overflow: ellipsis; }
+    #chapter { font-size: 12px; color: #aaa; }
+
+    #viewer {
+      flex: 1;
+      margin: 0 auto;
+      max-width: 900px;
+      width: 100%;
+      background: #fafafa;
+      box-shadow: 0 0 30px rgba(0,0,0,.5);
+    }
+
+    #status {
+      position: fixed;
+      top: 55px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,.8); color: #fff;
+      padding: 8px 16px; border-radius: 6px;
+      font-size: 13px; display: none; z-index: 10;
+    }
+
+    input[type=file] { display: none; }
+  </style>
+</head>
+<body>
+  <div id="status">Caricamento...</div>
+
+  <div id="toolbar">
+    <button id="prev" disabled>‹ Precedente</button>
+    <span id="title">Lettore EPUB</span>
+    <button id="next" disabled>Successivo ›</button>
+    <button id="open">Apri file…</button>
+    <input type="file" id="file" accept=".epub,application/epub+zip">
+    <span id="chapter"></span>
+  </div>
+
+  <div id="viewer"></div>
+
+  <script>
+    var book = null;
+    var rendition = null;
+    var viewer = document.getElementById("viewer");
+    var statusEl = document.getElementById("status");
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+      statusEl.style.display = msg ? "block" : "none";
+    }
+
+    function openBook(url) {
+      if (book) book.destroy();
+      setStatus("Apertura del libro…");
+
+      book = ePub(url);
+      rendition = book.renderTo("viewer", {
+        width: "100%",
+        height: "100%",
+        flow: "paginated"
+      });
+
+      rendition.display().then(function () {
+        setStatus("");
+        document.getElementById("prev").disabled = false;
+        document.getElementById("next").disabled = false;
+        var title = book.packaging.metadata.title;
+        if (title) document.getElementById("title").textContent = title;
+      });
+
+      rendition.on("relocated", function (location) {
+        var label = "";
+        if (location.start && location.start.href) {
+          var nav = book.navigation.get(location.start.href);
+          if (nav) label = nav.label;
+        }
+        document.getElementById("chapter").textContent = label;
+      });
+    }
+
+    document.getElementById("prev").addEventListener("click", function () {
+      if (rendition) rendition.prev();
+    });
+    document.getElementById("next").addEventListener("click", function () {
+      if (rendition) rendition.next();
+    });
+
+    // Scelta di un file .epub dal disco
+    document.getElementById("open").addEventListener("click", function () {
+      document.getElementById("file").click();
+    });
+    document.getElementById("file").addEventListener("change", function (e) {
+      var file = e.target.files[0];
+      if (!file) return;
+      openBook(file);
+    });
+
+    // Tastiera: frecce per navigare
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowRight") rendition && rendition.next();
+      if (e.key === "ArrowLeft") rendition && rendition.prev();
+    });
+
+    // All'avvio carica il libro di esempio servito da Flask
+    openBook("/book.epub");
+  </script>
+</body>
+</html>

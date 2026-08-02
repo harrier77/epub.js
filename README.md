@@ -1,6 +1,54 @@
-# Epub.js v0.3
+# Epub.js v0.3 (Flask Fork)
 
 ![FuturePress Views](http://fchasen.com/futurepress/fp.png)
+
+> **Fork notice:** This fork aims to serve the app with **Python Flask**. The library is used as the front-end rendering engine inside a Flask-based web application, allowing ePub documents to be displayed in the browser through a Python backend.
+
+---
+
+## Flask Reader App (`reader/`)
+
+This fork adds a small self-contained Flask app that serves a reader page powered by epub.js:
+
+```
+reader/
+├── app.py                  # Flask server
+└── static/
+    ├── epub.js             # built epub.js bundle (copied from dist/)
+    ├── jszip.min.js        # JSZip global (required by the bundle, see fixes below)
+    ├── index.html          # reader page (navigation, open-from-file, keyboard)
+    └── book.epub           # sample book, downloaded on first run (Alice in Wonderland)
+```
+
+### Run
+
+```bash
+cd reader
+python3 app.py            # needs Flask: pip install flask
+# open http://127.0.0.1:5000
+```
+
+On first start the app downloads `book.epub` (Alice in Wonderland, public domain) from the epub.js S3 bucket. To read another book, replace `static/book.epub` or use the **Apri file…** button in the page.
+
+### Fixes applied in this fork
+
+1. **JSZip must be loaded *before* `epub.js`** — `webpack.config.js` declares `jszip/dist/jszip` as an *external* dependency (`externals: { "jszip/dist/jszip": "JSZip" }`), so the built bundle expects a global `window.JSZip` at runtime. Without it, `new JSZip()` inside `Archive.checkRequirements()` throws `"JSZip lib not loaded"` and the page stays blank. The official examples load it from a CDN; this fork serves a local copy from `node_modules` (`jszip.min.js`, v3.7.1) so the app works offline.
+
+   ```html
+   <script src="/jszip.min.js"></script>  <!-- MUST precede epub.js -->
+   <script src="/epub.js"></script>
+   ```
+
+2. **Building on modern Node (>=17)** — webpack 4 in this project fails with `ERR_OSSL_EVP_UNSUPPORTED` on Node 17+. Build with:
+
+   ```bash
+   npm install --ignore-scripts   # skips the failing prepare build
+   NODE_OPTIONS=--openssl-legacy-provider npm run build
+   cp dist/epub.js reader/static/
+   cp node_modules/jszip/dist/jszip.min.js reader/static/
+   ```
+
+---
 
 Epub.js is a JavaScript library for rendering ePub documents in the browser, across many devices.
 
