@@ -22,9 +22,10 @@ and saved to `static/book.epub`.
 ### Server-side library (no client file picker)
 Books are not opened from the client's disk: the server exposes
 `GET /api/books`, which lists the `.epub` files in `static/`. The **Library**
-menu in the toolbar shows the titles (extracted from each EPUB's OPF
-metadata); just drop an `.epub` into `static/` and reload the page to see it
-appear.
+button in the toolbar opens a left sidebar listing the books (title extracted
+from each EPUB's OPF metadata, size and filename); clicking a book opens it
+and the current book is highlighted. Just drop an `.epub` into `static/` and
+reload the page to see it appear.
 
 ### Single page / two-page spread
 The **Single page / Two pages** button switches at runtime between
