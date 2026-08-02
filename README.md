@@ -6,9 +6,9 @@
 
 ---
 
-## Flask Reader App (`reader/`)
+## Flask Reader App ([`reader/`](reader/README.md))
 
-This fork adds a small self-contained Flask app that serves a reader page powered by epub.js:
+This fork adds a small self-contained Flask app that serves a reader page powered by epub.js. **Full documentation of the reader app is in its own [README](reader/README.md).**
 
 ```
 reader/
@@ -16,7 +16,7 @@ reader/
 └── static/
     ├── epub.js             # built epub.js bundle (copied from dist/)
     ├── jszip.min.js        # JSZip global (required by the bundle, see fixes below)
-    ├── index.html          # reader page (navigation, open-from-file, keyboard)
+    ├── index.html          # reader page (library, view controls, sidebar)
     └── book.epub           # sample book, downloaded on first run (Alice in Wonderland)
 ```
 
@@ -28,7 +28,7 @@ python3 app.py            # needs Flask: pip install flask
 # open http://127.0.0.1:5000
 ```
 
-On first start the app downloads `book.epub` (Alice in Wonderland, public domain) from the epub.js S3 bucket. To read another book, replace `static/book.epub` or use the **Apri file…** button in the page.
+On first start the app downloads `book.epub` (Alice in Wonderland, public domain) from the epub.js S3 bucket. To read other books, drop `.epub` files into `static/` and pick them from the **Library** menu in the page.
 
 ### Fixes applied in this fork
 
