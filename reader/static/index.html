@@ -39,9 +39,87 @@
     }
     #toolbar button:hover { background: #666; }
     #toolbar button:disabled { opacity: .4; cursor: default; }
+    #bookSelect {
+      background: #555;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-size: 14px;
+      max-width: 240px;
+    }
     #title { flex: 1; text-align: center; font-weight: 600; overflow: hidden;
              white-space: nowrap; text-overflow: ellipsis; }
     #chapter { font-size: 12px; color: #aaa; }
+    #filesToggle.active { background: #777; }
+
+    #sidebar {
+      position: fixed;
+      top: 48px;
+      left: 0;
+      bottom: 0;
+      width: 300px;
+      max-width: 85vw;
+      background: #3a3a3a;
+      border-right: 1px solid #555;
+      box-shadow: 3px 0 12px rgba(0,0,0,.45);
+      transform: translateX(-105%);
+      transition: transform .2s ease;
+      display: flex;
+      flex-direction: column;
+      z-index: 20;
+      overflow: hidden;
+    }
+    #sidebar.open { transform: translateX(0); }
+
+    #sidebarHeader {
+      display: flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-bottom: 1px solid #555;
+      font-weight: 600;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+    #sidebarHeader span { flex: 1; }
+    #sidebarClose {
+      background: none;
+      border: none;
+      color: #ccc;
+      font-size: 16px;
+      cursor: pointer;
+      padding: 0 4px;
+    }
+    #sidebarClose:hover { color: #fff; }
+
+    #fileList {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .fileGroup { margin-bottom: 12px; }
+    .fileGroup h4 {
+      margin: 6px 4px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: #999;
+    }
+    .fileItem {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      font-size: 13px;
+      word-break: break-all;
+      cursor: default;
+      color: #ddd;
+    }
+    .fileItem.spine { cursor: pointer; }
+    .fileItem.spine:hover { background: #444; }
+    .fileItem.active { background: #5a7fb0; color: #fff; }
+    .fileIcon { font-size: 15px; flex-shrink: 0; }
 
     #viewer {
       flex: 1;
@@ -60,26 +138,53 @@
       font-size: 13px; display: none; z-index: 10;
     }
 
-    input[type=file] { display: none; }
   </style>
 </head>
 <body>
   <div id="status">Caricamento...</div>
 
   <div id="toolbar">
+    <button id="filesToggle" title="File inclusi nell'EPUB">File</button>
     <button id="prev" disabled>‹ Precedente</button>
     <span id="title">Lettore EPUB</span>
     <button id="next" disabled>Successivo ›</button>
-    <button id="open">Apri file…</button>
-    <input type="file" id="file" accept=".epub,application/epub+zip">
+    <button id="spreadToggle" disabled>Una pagina</button>
+    <select id="widthSelect" title="Larghezza massima pagina">
+      <option value="40">40%</option>
+      <option value="45">45%</option>
+      <option value="50">50%</option>
+      <option value="55">55%</option>
+      <option value="60">60%</option>
+      <option value="65">65%</option>
+      <option value="70">70%</option>
+      <option value="75">75%</option>
+      <option value="80">80%</option>
+      <option value="85">85%</option>
+      <option value="90" selected>90%</option>
+      <option value="95">95%</option>
+      <option value="100">100%</option>
+    </select>
+    <select id="bookSelect" title="Libreria">
+      <option value="">Libreria…</option>
+    </select>
     <span id="chapter"></span>
   </div>
 
   <div id="viewer"></div>
 
+  <aside id="sidebar" aria-hidden="true">
+    <div id="sidebarHeader">
+      <span>File dell'EPUB</span>
+      <button id="sidebarClose" title="Chiudi">✕</button>
+    </div>
+    <div id="fileList"></div>
+  </aside>
+
   <script>
     var book = null;
     var rendition = null;
+    var spreadOn = true; // doppia pagina affiancata (default)
+    var fileEls = {};    // href -> elemento riga nella sidebar
     var viewer = document.getElementById("viewer");
     var statusEl = document.getElementById("status");
 
@@ -103,8 +208,16 @@
         setStatus("");
         document.getElementById("prev").disabled = false;
         document.getElementById("next").disabled = false;
+        document.getElementById("spreadToggle").disabled = false;
+        document.getElementById("filesToggle").disabled = false;
         var title = book.packaging.metadata.title;
         if (title) document.getElementById("title").textContent = title;
+        try {
+          buildFileList();
+        } catch (err) {
+          document.getElementById("fileList").textContent =
+            "Errore: " + err.message;
+        }
       });
 
       rendition.on("relocated", function (location) {
@@ -114,6 +227,13 @@
           if (nav) label = nav.label;
         }
         document.getElementById("chapter").textContent = label;
+
+        // Evidenzia il file attivo nella sidebar (browser del pacchetto)
+        for (var h in fileEls) fileEls[h].classList.remove("active");
+        if (location.start && location.start.href && fileEls[location.start.href]) {
+          fileEls[location.start.href].classList.add("active");
+          fileEls[location.start.href].scrollIntoView({ block: "nearest" });
+        }
       });
     }
 
@@ -124,24 +244,150 @@
       if (rendition) rendition.next();
     });
 
-    // Scelta di un file .epub dal disco
-    document.getElementById("open").addEventListener("click", function () {
-      document.getElementById("file").click();
-    });
-    document.getElementById("file").addEventListener("change", function (e) {
-      var file = e.target.files[0];
-      if (!file) return;
-      openBook(file);
+    // Toggle pagina singola / doppia pagina affiancata
+    document.getElementById("spreadToggle").addEventListener("click", function () {
+      if (!rendition) return;
+      spreadOn = !spreadOn;
+      rendition.spread(spreadOn ? "auto" : "none");
+      document.getElementById("spreadToggle").textContent =
+        spreadOn ? "Una pagina" : "Due pagine";
     });
 
-    // Tastiera: frecce per navigare
+    // Sidebar: toggle on/off del browser del pacchetto EPUB
+    document.getElementById("filesToggle").addEventListener("click", function () {
+      document.getElementById("sidebar").classList.toggle("open");
+      this.classList.toggle("active");
+    });
+    document.getElementById("sidebarClose").addEventListener("click", function () {
+      document.getElementById("sidebar").classList.remove("open");
+      document.getElementById("filesToggle").classList.remove("active");
+    });
+
+    function buildFileList() {
+      fileEls = {};
+      var list = document.getElementById("fileList");
+      list.innerHTML = "";
+
+      var spine = {};
+      book.spine.each(function (s) { spine[s.href] = s; });
+
+      var manifest = book.packaging.manifest || {};
+      var items = Object.keys(manifest).map(function (id) {
+        var m = manifest[id];
+        return { id: id, href: m.href, type: m.type };
+      });
+
+      if (!items.length) {
+        var empty = document.createElement("div");
+        empty.textContent = "Nessun file nel manifest.";
+        empty.style.cssText = "color:#999;font-size:13px;padding:8px;";
+        list.appendChild(empty);
+        return;
+      }
+
+      function addGroup(label, icon, match) {
+        var groupItems = items.filter(function (it) { return match(it.type); });
+        if (!groupItems.length) return;
+        var group = document.createElement("div");
+        group.className = "fileGroup";
+        var h = document.createElement("h4");
+        h.textContent = label;
+        group.appendChild(h);
+        groupItems.forEach(function (it) {
+          var row = document.createElement("div");
+          row.className = "fileItem";
+          var inSpine = !!spine[it.href];
+          if (inSpine) {
+            row.classList.add("spine");
+            row.title = "Apri nel lettore";
+            row.addEventListener("click", (function (href) {
+              return function () { if (rendition) rendition.display(href); };
+            })(it.href));
+          } else {
+            row.title = "File di supporto (fuori dal flusso di lettura)";
+          }
+          var ic = document.createElement("span");
+          ic.className = "fileIcon";
+          ic.textContent = icon;
+          row.appendChild(ic);
+          row.appendChild(document.createTextNode(it.href));
+          group.appendChild(row);
+          fileEls[it.href] = row;
+        });
+        list.appendChild(group);
+      }
+
+      addGroup("Documenti", "📄", function (t) {
+        return t === "application/xhtml+xml" || t === "text/html";
+      });
+      addGroup("Stili", "🎨", function (t) { return t === "text/css"; });
+      addGroup("Immagini", "🖼️", function (t) { return t.indexOf("image/") === 0; });
+      addGroup("Font", "🔤", function (t) {
+        return t.indexOf("font/") === 0 || t.indexOf("application/font") === 0 ||
+               t === "application/vnd.ms-opentype" || t === "application/vnd.ms-fontobject";
+      });
+      addGroup("Script", "⚙️", function (t) {
+        return t === "application/javascript" || t === "text/javascript" ||
+               t === "application/x-javascript";
+      });
+      addGroup("Audio/Video", "🎬", function (t) {
+        return t.indexOf("audio/") === 0 || t.indexOf("video/") === 0;
+      });
+      addGroup("Altri file", "🗂️", function (t) {
+        return !(t === "application/xhtml+xml" || t === "text/html" ||
+                 t === "text/css" || t.indexOf("image/") === 0 ||
+                 t.indexOf("font/") === 0 || t.indexOf("application/font") === 0 ||
+                 t === "application/vnd.ms-opentype" || t === "application/vnd.ms-fontobject" ||
+                 t === "application/javascript" || t === "text/javascript" ||
+                 t === "application/x-javascript" ||
+                 t.indexOf("audio/") === 0 || t.indexOf("video/") === 0);
+      });
+    }
+    viewer.style.maxWidth = document.getElementById("widthSelect").value + "%";
+    document.getElementById("widthSelect").addEventListener("change", function () {
+      viewer.style.maxWidth = this.value + "%";
+      if (rendition) rendition.resize(); // ri-calcola il layout della pagina
+    });
+
+    // Libreria: elenco dei libri .epub presenti sul server
+    function loadBookList() {
+      fetch("/api/books")
+        .then(function (r) { return r.json(); })
+        .then(function (books) {
+          var sel = document.getElementById("bookSelect");
+          sel.innerHTML = "";
+          books.forEach(function (b) {
+            var opt = document.createElement("option");
+            opt.value = b.url;
+            opt.textContent = b.title;
+            sel.appendChild(opt);
+          });
+          sel.addEventListener("change", function () {
+            if (sel.value) openBook(sel.value);
+          });
+          if (books.length > 0) {
+            openBook(books[0].url);
+          } else {
+            setStatus("Nessun libro trovato: metti dei file .epub in static/");
+          }
+        })
+        .catch(function (err) {
+          setStatus("Errore nel caricamento della libreria: " + err);
+        });
+    }
+
+    // Tastiera: frecce per navigare, Esc per chiudere la sidebar
     document.addEventListener("keydown", function (e) {
       if (e.key === "ArrowRight") rendition && rendition.next();
       if (e.key === "ArrowLeft") rendition && rendition.prev();
+      if (e.key === "Escape") {
+        document.getElementById("sidebar").classList.remove("open");
+        document.getElementById("filesToggle").classList.remove("active");
+      }
     });
 
-    // All'avvio carica il libro di esempio servito da Flask
-    openBook("/book.epub");
+    // All'avvio carica l'elenco dei libri serviti da Flask
+    loadBookList();
   </script>
 </body>
 </html>

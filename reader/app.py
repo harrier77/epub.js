@@ -7,15 +7,17 @@ Uso:
 
 Al primo avvio scarica un libro di esempio (Alice nel Paese delle
 Meraviglie) da https://s3.amazonaws.com/epubjs/books/alice.epub e lo
-salva in static/book.epub. Per leggere un altro libro, sostituisci
-static/book.epub con il tuo file .epub oppure usa il pulsante "apri
-file" nella pagina.
+salva in static/book.epub. Per leggere altri libri, metti i file
+.epub nella cartella static/: compariranno nel menu "Libreria" della
+pagina.
 """
 
 import argparse
 import os
 import sys
 import urllib.request
+import zipfile
+import xml.etree.ElementTree as ET
 
 from flask import Flask, jsonify, send_from_directory
 
@@ -40,6 +42,44 @@ def static_files(filename):
 @app.route("/api/health")
 def health():
     return jsonify(status="ok")
+
+
+@app.route("/api/books")
+def list_books():
+    """Elenca i file .epub presenti nella cartella static/."""
+    books = []
+    os.makedirs(STATIC_DIR, exist_ok=True)
+    for name in sorted(os.listdir(STATIC_DIR)):
+        if name.lower().endswith(".epub"):
+            path = os.path.join(STATIC_DIR, name)
+            books.append(
+                {
+                    "name": name,
+                    "title": epub_title(path) or os.path.splitext(name)[0],
+                    "url": "/" + name,
+                    "size": os.path.getsize(path),
+                }
+            )
+    return jsonify(books)
+
+
+def epub_title(path):
+    """Estrae il titolo da un .epub leggendone i metadati OPF."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            container = ET.fromstring(zf.read("META-INF/container.xml"))
+            ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
+            rootfile = container.find(".//c:rootfile", ns)
+            if rootfile is None:
+                return None
+            opf_path = rootfile.get("full-path")
+            opf = ET.fromstring(zf.read(opf_path))
+            title = opf.find(".//{http://purl.org/dc/elements/1.1/}title")
+            if title is not None and title.text and title.text.strip():
+                return title.text.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def ensure_sample_book():
