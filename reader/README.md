@@ -4,7 +4,9 @@ EPUB ebook reader served by Flask and rendered in the browser with
 [epub.js](https://github.com/futurepress/epub.js). The goal is to get closer
 to the experience of EPUB editors such as [Sigil](https://sigil-ebook.com),
 replicating some of their features that are useful for reading and inspecting
-files: server-side library, view controls and an EPUB package browser.
+files: server-side library, view controls, an EPUB package browser and an
+HTML editor for the chapters (same features as the standalone Nim/WebView2
+version in `Nimcode/epub_editor`, with the Flask backend replacing the bridge).
 
 ## Run
 
@@ -48,6 +50,23 @@ Audio/Video, Other):
 - the current file is highlighted automatically on every page change;
 - the sidebar closes with the ✕ button or with `Esc`.
 
+### Chapter HTML editor
+Two tabs, **📖 Read** and **✏️ Edit HTML**, switch between the paginated viewer
+and a code editor showing the current chapter's source (loaded from the EPUB
+archive in memory via `book.archive.request`). The toolbar also has a **Pad %**
+input that overrides the default padding with a percentage of the page width
+(re-applied with a MutationObserver whenever epub.js rewrites the inline style).
+
+- **Save** (`POST /api/save_chapter`) rewrites the `.epub` on disk, replacing
+  the current chapter entry with the edited content (zip rebuilt preserving the
+  other entries' metadata, atomic write via `.tmp` + `os.replace`);
+- after a successful save the chapter is re-rendered in the viewer **without
+  reloading the book**: the client patches the in-memory `book.archive` and
+  invalidates the section/view caches (`updateChapterDom()`), the same trick
+  used by `updateChapterDomJs` in the Nim version;
+- the server validates the book name (basename only) and the entry path (no
+  `..` traversal) before touching the file.
+
 ### Navigation
 - **‹ Previous / Next ›** buttons
 - **← / →** arrow keys
@@ -55,9 +74,9 @@ Audio/Video, Other):
 ## Structure
 
 ```
-app.py           Flask server: library, /api/books endpoint, title extraction
+app.py           Flask server: library, /api/books + /api/save_chapter endpoints, title extraction
 static/          .epub books and web assets
-  index.html     UI (toolbar, viewer, sidebar)
+  index.html     UI (toolbar, viewer, tabs, HTML editor, sidebars)
   epub.js        epub.js library
   jszip.min.js   epub.js dependency (loaded BEFORE epub.js)
 ```

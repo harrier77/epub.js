@@ -19,7 +19,7 @@ import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
 
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -61,6 +61,81 @@ def list_books():
                 }
             )
     return jsonify(books)
+
+
+@app.route("/api/save_chapter", methods=["POST"])
+def save_chapter():
+    """Salva il contenuto modificato di una voce dentro il .epub.
+
+    Equivalente di saveChapterIntoEpub in epub_app.nim (versione Nim):
+    ricompone lo zip sostituendo la voce `href` con `content`, preservando
+    i metadati delle altre voci e scrivendo in modo atomico (.tmp + replace).
+
+    Richiesta JSON: {"book": "nome.epub", "href": "path/dentro/l\'epub",
+                    "content": "<html>..."}
+    Risposta: {"ok": true} oppure {"ok": false, "error": "..."}
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify(ok=False, error="Richiesta JSON non valida"), 400
+
+    book_name = data.get("book", "")
+    href = data.get("href", "")
+    content = data.get("content", "")
+
+    # Validazione del nome libro: solo basename, .epub esistente in static/
+    if (
+        not book_name
+        or book_name != os.path.basename(book_name)
+        or "/" in book_name
+        or "\\" in book_name
+        or ".." in book_name
+        or not book_name.lower().endswith(".epub")
+    ):
+        return jsonify(ok=False, error="Nome libro non valido: " + book_name)
+    book_path = os.path.join(STATIC_DIR, book_name)
+    if not os.path.isfile(book_path):
+        return jsonify(ok=False, error="File non trovato: " + book_name)
+
+    # Validazione href: niente path traversal (nessun segmento "..")
+    href = href.lstrip("/")
+    if not href or ".." in href.replace("\\", "/").split("/"):
+        return jsonify(ok=False, error="Percorso non valido: " + href)
+
+    try:
+        with zipfile.ZipFile(book_path, "r") as zf:
+            names = zf.namelist()
+            infos = {zi.filename: zi for zi in zf.infolist()}
+            contents = {n: zf.read(n) for n in names}
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error="Impossibile aprire l'epub: " + str(exc))
+
+    # Match case-insensitive della voce (come cmpIgnoreCase in Nim)
+    target = next((n for n in names if n.lower() == href.lower()), None)
+    if target is None:
+        return jsonify(ok=False, error="Il file " + href + " non e' presente nell'epub")
+    href = target
+
+    # Scrittura su file temporaneo + os.replace (sostituzione atomica)
+    tmp_path = book_path + ".tmp"
+    try:
+        with zipfile.ZipFile(tmp_path, "w") as zf:
+            for name in names:
+                zi = infos[name]
+                if name == href:
+                    zf.writestr(zi, content.encode("utf-8"))
+                else:
+                    zf.writestr(zi, contents[name])
+        os.replace(tmp_path, book_path)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return jsonify(ok=False, error="Errore durante la scrittura: " + str(exc))
+
+    return jsonify(ok=True)
 
 
 def epub_title(path):

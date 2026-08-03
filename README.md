@@ -12,11 +12,11 @@ This fork adds a small self-contained Flask app that serves a reader page powere
 
 ```
 reader/
-├── app.py                  # Flask server
+├── app.py                  # Flask server (library + chapter save API)
 └── static/
     ├── epub.js             # built epub.js bundle (copied from dist/)
     ├── jszip.min.js        # JSZip global (required by the bundle, see fixes below)
-    ├── index.html          # reader page (library, view controls, sidebar)
+    ├── index.html          # reader page (library, view controls, HTML editor)
     └── book.epub           # sample book, downloaded on first run (Alice in Wonderland)
 ```
 
@@ -29,6 +29,25 @@ python3 app.py            # needs Flask: pip install flask
 ```
 
 On first start the app downloads `book.epub` (Alice in Wonderland, public domain) from the epub.js S3 bucket. To read other books, drop `.epub` files into `static/` and pick them from the **Library** menu in the page.
+
+### Chapter HTML editor
+
+Since the last update the reader includes the same editing features as the
+standalone Nim/WebView2 version (`Nimcode/epub_editor`, same frontend with the
+Flask backend replacing the bridge):
+
+- **Read / Edit HTML tabs** — the **✏️ Edit HTML** tab shows the source of the
+  current chapter (loaded in memory via `book.archive.request`);
+- **Save** calls `POST /api/save_chapter`, which rewrites the `.epub` on disk
+  (zip rebuilt preserving the other entries' metadata, atomic write via
+  `.tmp` + `os.replace`) and returns `{ok: true}`;
+- after saving, the chapter is re-rendered **without reloading the book**: the
+  client patches the in-memory `book.archive` and invalidates the section/view
+  caches (the `updateChapterDomJs` trick from the Nim app, now client-side);
+- the server validates the book name (basename only) and the entry path (no
+  `..` traversal) before touching the file;
+- the toolbar also gained a **Pad %** input that overrides the default
+  body padding with a percentage of the page width.
 
 ### Fixes applied in this fork
 
