@@ -775,6 +775,9 @@
       function addGroup(label, icon, match) {
         var groupItems = items.filter(function (it) { return match(it.type); });
         if (!groupItems.length) return;
+        groupItems.sort(function (a, b) {
+          return a.href.localeCompare(b.href);
+        });
         var group = document.createElement("div");
         group.className = "fileGroup";
         var h = document.createElement("h4");
