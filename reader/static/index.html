@@ -277,32 +277,54 @@
       display: none;
       position: fixed;
       z-index: 1000;
-      width: 380px;
-      max-width: 90vw;
-      min-width: 280px;
-      min-height: 160px;
+      width: 500px;
+      max-width: 92vw;
+      min-width: 360px;
+      min-height: 240px;
       overflow: hidden;
       background: #262626;
       border: 1px solid #666;
       border-radius: 8px;
       box-shadow: 0 6px 24px rgba(0,0,0,.55);
       flex-direction: column;
-      font-size: 13px;
+      font-size: 15px;
     }
     #inlineEditor.open { display: flex; }
-    .ieHead {
+    /* Maniglia per spostare il popover (comodo su touch, senza mouse) */
+    #ieHandle {
+      flex-shrink: 0;
+      height: 30px;
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
+      justify-content: center;
       background: #2f2f2f;
+      color: #9a9a9a;
+      font-size: 13px;
+      letter-spacing: 5px;
+      cursor: grab;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;   /* niente pan/scroll: il gesto sposta il popover */
       border-bottom: 1px solid #555;
       border-radius: 8px 8px 0 0;
     }
+    #ieHandle:active { cursor: grabbing; color: #ddd; }
+    .ieHead {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: #2f2f2f;
+      border-bottom: 1px solid #555;
+      border-radius: 0;
+      touch-action: none;
+      cursor: grab;
+    }
+    .ieHead:active { cursor: grabbing; }
     .ieHead span {
       flex: 1;
       font-family: Consolas, monospace;
-      font-size: 12px;
+      font-size: 15px;
       color: #bbb;
       overflow: hidden;
       white-space: nowrap;
@@ -313,48 +335,59 @@
       border: none;
       color: #ccc;
       cursor: pointer;
-      font-size: 14px;
-      padding: 0 2px;
+      font-size: 17px;
+      padding: 0 4px;
     }
     .ieHead button:hover { color: #fff; }
     #ieCode {
       width: 100%;
       flex: 1 1 auto;
-      min-height: 90px;
-      max-height: 45vh;
+      min-height: 160px;
+      max-height: 55vh;
       border: none;
       outline: none;
       resize: none;
-      padding: 8px;
+      padding: 12px;
       background: #1e1e1e;
       color: #dcdcdc;
       font-family: Consolas, 'Courier New', monospace;
-      font-size: 12px;
-      line-height: 1.45;
+      font-size: 15px;
+      line-height: 1.6;
       tab-size: 2;
       white-space: pre-wrap;   /* testo a capo invece dello scroll orizzontale */
       overflow-wrap: break-word;
       word-break: break-word;
       overflow: auto;
     }
-    /* Grip per il ridimensionamento manuale (in basso a destra) */
+    /* Grip per il ridimensionamento manuale (in basso a destra): zona
+       generosa per il touch, touch-action: none così il gesto non viene
+       interpretato dal browser come scroll/pan */
     #ieGrip {
       position: absolute;
       right: 0;
       bottom: 0;
-      width: 18px;
-      height: 18px;
+      width: 48px;
+      height: 48px;
       cursor: nwse-resize;
-      background: linear-gradient(135deg, transparent 50%, #7a7a7a 50%);
-      border-bottom-right-radius: 7px;
+      touch-action: none;
       user-select: none;
+      -webkit-user-select: none;
+      border-bottom-right-radius: 7px;
+      background:
+        linear-gradient(135deg, transparent 50%, #bdbdbd 50%) 24px 24px / 36px 36px no-repeat,
+        linear-gradient(135deg, transparent 50%, #7a7a7a 50%) 12px 12px / 36px 36px no-repeat;
     }
-    #ieGrip:hover { background: linear-gradient(135deg, transparent 50%, #a0a0a0 50%); }
+    #ieGrip:hover,
+    #ieGrip:active {
+      background:
+        linear-gradient(135deg, transparent 50%, #e0e0e0 50%) 24px 24px / 36px 36px no-repeat,
+        linear-gradient(135deg, transparent 50%, #a0a0a0 50%) 12px 12px / 36px 36px no-repeat;
+    }
     .ieFoot {
       display: flex;
       justify-content: flex-end;
-      gap: 8px;
-      padding: 8px 10px;
+      gap: 10px;
+      padding: 10px 14px;
       border-top: 1px solid #555;
     }
     .ieFoot button {
@@ -362,9 +395,9 @@
       color: #fff;
       border: none;
       border-radius: 4px;
-      padding: 6px 14px;
+      padding: 8px 18px;
       cursor: pointer;
-      font-size: 13px;
+      font-size: 15px;
     }
     .ieFoot button:hover { background: #666; }
     .ieFoot button:disabled { opacity: .4; cursor: default; }
@@ -430,6 +463,7 @@
 
   <!-- Popover fluttuante: editing in-context del paragrafo cliccato -->
   <div id="inlineEditor" aria-hidden="true">
+    <div id="ieHandle" title="Trascina per spostare">☰ ☰ ☰</div>
     <div class="ieHead">
       <span id="ieTitle">Modifica paragrafo</span>
       <button id="ieClose" title="Chiudi (Esc)">✕</button>
@@ -591,6 +625,37 @@
         if (contents) contents.forEach(function (c) {
           if (c && c.document) bindInlineEdit(c); // prepara il popover in-context al click (invisibile)
         });
+      });
+
+      // Swipe orizzontale per girare pagina. Gli eventi touch arrivano dai
+      // documenti interni degli iframe tramite passEvents di epub.js, quindi
+      // lo swipe funziona anche sopra al testo. Chiama la stessa navigate()
+      // dei bottoni prev/next (stessa guardia anti doppio-gesto): i bottoni
+      // continuano a funzionare e i gesti lenti (selezione testo) o verticali
+      // vengono ignorati. Nota: epub.js riceve questi eventi come "passive",
+      // quindi non facciamo preventDefault: dopo uno swipe vero Chrome non
+      // genera comunque il click, quindi non si apre l'editor in-context.
+      var swipeStartX = null, swipeStartY = null, swipeStartT = 0;
+      rendition.on("touchstart", function (e) {
+        if (!e.touches || e.touches.length !== 1) { swipeStartX = null; return; }
+        swipeStartX = e.touches[0].clientX;
+        swipeStartY = e.touches[0].clientY;
+        swipeStartT = performance.now();
+      });
+      rendition.on("touchend", function (e) {
+        if (swipeStartX == null) return;
+        var t = e.changedTouches && e.changedTouches[0];
+        if (!t) { swipeStartX = null; return; }
+        var dx = t.clientX - swipeStartX;
+        var dy = t.clientY - swipeStartY;
+        var dt = performance.now() - swipeStartT;
+        swipeStartX = null;
+        if (dt > 800 || dt < 30) return;              // gesto lento (selezione testo) o troppo corto
+        if (Math.abs(dx) < 60) return;                // distanza minima per considerarlo uno swipe
+        if (Math.abs(dx) < Math.abs(dy) * 1.5) return; // deve essere nettamente orizzontale
+        // Stessa logica dei bottoni: rispetta i bordi del libro
+        if (dx < 0 && !document.getElementById("next").disabled) navigate(1);
+        else if (dx > 0 && !document.getElementById("prev").disabled) navigate(-1);
       });
 
       rendition.display().then(function () {
@@ -882,7 +947,9 @@
       inlineEditor.classList.add("open");
       positionInlineEditor(inlineCtx.px, inlineCtx.py); // ri-clampa con dimensioni reali
       ieCode.focus();
-      ieCode.select();
+      // Cursore alla fine del testo invece della selezione completa:
+      // così si può correggere l'ultimo carattere o digitare subito.
+      ieCode.setSelectionRange(ieCode.value.length, ieCode.value.length);
       setStatus("");
     });
     document.getElementById("reloadEditor").addEventListener("click", loadEditorContent);
@@ -1092,7 +1159,9 @@
         inlineEditor.setAttribute("aria-hidden", "false");
         inlineEditor.classList.add("open");
         ieCode.focus();
-        ieCode.select();
+        // Cursore alla fine del testo invece della selezione completa:
+        // così si può correggere l'ultimo carattere o digitare subito.
+        ieCode.setSelectionRange(ieCode.value.length, ieCode.value.length);
       }
     }
 
@@ -1291,28 +1360,38 @@
     ieCancel.addEventListener("click", closeInlineEditor);
     ieClose.addEventListener("click", closeInlineEditor);
 
-    // Trascina il popover dalla barra del titolo (Pointer Events + capture:
-    // gli eventi continuano ad arrivare anche se il puntatore passa sopra
-    // l'iframe del viewer)
-    inlineEditor.querySelector(".ieHead").addEventListener("pointerdown", function (e) {
-      if (e.target && e.target.closest && e.target.closest("button")) return;
-      e.preventDefault();
-      var head = this;
-      try { head.setPointerCapture(e.pointerId); } catch (err) {}
-      var startX = e.clientX, startY = e.clientY;
-      var origLeft = parseFloat(inlineEditor.style.left) || 0;
-      var origTop = parseFloat(inlineEditor.style.top) || 0;
-      function onMove(ev) {
-        inlineEditor.style.left = (origLeft + ev.clientX - startX) + "px";
-        inlineEditor.style.top = (origTop + ev.clientY - startY) + "px";
-      }
-      function onUp() {
-        head.removeEventListener("pointermove", onMove);
-        head.removeEventListener("pointerup", onUp);
-      }
-      head.addEventListener("pointermove", onMove);
-      head.addEventListener("pointerup", onUp);
-    });
+    // Trascina il popover dalla maniglia (o dalla barra del titolo) con
+    // Pointer Events + capture: gli eventi continuano ad arrivare anche se il
+    // puntatore passa sopra l'iframe del viewer. touch-action: none nel CSS
+    // fa sì che su touch il gesto non venga interpretato come scroll/pan.
+    function makePopoverDraggable(handleEl) {
+      handleEl.addEventListener("pointerdown", function (e) {
+        if (e.target && e.target.closest && e.target.closest("button")) return;
+        e.preventDefault();
+        var h = this;
+        try { h.setPointerCapture(e.pointerId); } catch (err) {}
+        var startX = e.clientX, startY = e.clientY;
+        var origLeft = parseFloat(inlineEditor.style.left) || 0;
+        var origTop = parseFloat(inlineEditor.style.top) || 0;
+        function onMove(ev) {
+          // mantiene il popover sempre almeno in parte visibile
+          var nx = origLeft + ev.clientX - startX;
+          var ny = origTop + ev.clientY - startY;
+          nx = Math.max(-inlineEditor.offsetWidth + 120, Math.min(nx, window.innerWidth - 120));
+          ny = Math.max(0, Math.min(ny, window.innerHeight - 60));
+          inlineEditor.style.left = nx + "px";
+          inlineEditor.style.top = ny + "px";
+        }
+        function onUp() {
+          h.removeEventListener("pointermove", onMove);
+          h.removeEventListener("pointerup", onUp);
+        }
+        h.addEventListener("pointermove", onMove);
+        h.addEventListener("pointerup", onUp);
+      });
+    }
+    makePopoverDraggable(inlineEditor.querySelector(".ieHead"));
+    makePopoverDraggable(document.getElementById("ieHandle"));
 
     // Ridimensiona il popover dal grip in basso a destra
     document.getElementById("ieGrip").addEventListener("pointerdown", function (e) {
@@ -1324,9 +1403,9 @@
       var origW = inlineEditor.offsetWidth, origH = inlineEditor.offsetHeight;
       function onMove(ev) {
         inlineEditor.style.width =
-          Math.min(Math.max(280, origW + ev.clientX - startX), window.innerWidth - 16) + "px";
+          Math.min(Math.max(360, origW + ev.clientX - startX), window.innerWidth - 16) + "px";
         inlineEditor.style.height =
-          Math.min(Math.max(160, origH + ev.clientY - startY), window.innerHeight - 16) + "px";
+          Math.min(Math.max(240, origH + ev.clientY - startY), window.innerHeight - 16) + "px";
       }
       function onUp() {
         grip.removeEventListener("pointermove", onMove);
