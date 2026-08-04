@@ -72,7 +72,10 @@ def save_chapter():
     i metadati delle altre voci e scrivendo in modo atomico (.tmp + replace).
 
     Richiesta JSON: {"book": "nome.epub", "href": "path/dentro/l\'epub",
-                    "content": "<html>..."}
+                    "content": "<html>...", "silent": false}
+    Il campo opzionale "silent" (usato dal popover di editing in-context)
+    è accettato per compatibilità con il frontend condiviso ma non ha effetti
+    lato server: in questa versione il ri-render del viewer è sempre client-side.
     Risposta: {"ok": true} oppure {"ok": false, "error": "..."}
     """
     data = request.get_json(silent=True)
@@ -82,6 +85,10 @@ def save_chapter():
     book_name = data.get("book", "")
     href = data.get("href", "")
     content = data.get("content", "")
+    # "silent" (opzionale): salvataggio in-context dal popover del viewer.
+    # In Flask il ri-render è sempre lato client, quindi il flag non ha
+    # alcun effetto lato server: viene letto solo per accettarlo.
+    _ = data.get("silent", False)
 
     # Validazione del nome libro: solo basename, .epub esistente in static/
     if (
