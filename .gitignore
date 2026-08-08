@@ -10,3 +10,4 @@ dist
 documentation/html
 types/*.js
 *.epub
+reader/static/schmitt/OEBPS
