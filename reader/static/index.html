@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Lettore EPUB</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="/icon.svg">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#3a3a3a">
   <!-- JSZip va caricato PRIMA di epub.js: il build lo tratta come dipendenza esterna.
        Path assoluti: il frontend Flask li serve da static/ (come la versione originale). -->
   <script src="/jszip.min.js"></script>
@@ -277,7 +279,7 @@
     .epub-container {
       touch-action: none;
       box-sizing: border-box;
-      padding: 3% 4%; /* margine attorno all'area di lettura; epub.js sottrae il padding del container dalla size */
+      padding: 3% 3%; /* margine attorno all'area di lettura; epub.js sottrae il padding del container dalla size */
     }
 
     /* Zoom della pagina (equivalente browser dello zoom WebView2 del port Nim):
@@ -290,7 +292,7 @@
       --chrome-zoom: 1;
     }
     #toolbar, #tabs, #status, #editorPanel,
-    #sidebar, #librarySidebar, #metaEditor {
+    #sidebar, #librarySidebar, #metaEditor, #buildReport {
       zoom: var(--chrome-zoom);
     }
 
@@ -335,7 +337,7 @@
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 10px 14px;
+      padding: 3px 10px;
       background: #2f2f2f;
       border-bottom: 1px solid #555;
       border-radius: 0;
@@ -357,15 +359,15 @@
       border: none;
       color: #ccc;
       cursor: pointer;
-      font-size: 17px;
-      padding: 0 4px;
+      font-size: 12px;
+      padding: 4px 4px;
     }
     .ieHead button:hover { color: #fff; }
     #ieCode {
       width: 100%;
       flex: 1 1 auto;
       min-height: 160px;
-      max-height: 55vh;
+      max-height: 60vh;
       border: none;
       outline: none;
       resize: none;
@@ -373,8 +375,8 @@
       background: #1e1e1e;
       color: #dcdcdc;
       font-family: Consolas, 'Courier New', monospace;
-      font-size: 15px;
-      line-height: 1.6;
+      font-size: 12px;
+      line-height: 1.2;
       tab-size: 2;
       white-space: pre-wrap;   /* testo a capo invece dello scroll orizzontale */
       overflow-wrap: break-word;
@@ -409,7 +411,7 @@
       display: flex;
       justify-content: flex-end;
       gap: 10px;
-      padding: 10px 14px;
+      padding: 4px 4px;
       border-top: 1px solid #555;
     }
     .ieHint {
@@ -428,14 +430,16 @@
       color: #fff;
       border: none;
       border-radius: 4px;
-      padding: 8px 18px;
+      padding: 3px 3px;
       cursor: pointer;
-      font-size: 15px;
+      font-size: 10px;
     }
     .ieFoot button:hover { background: #666; }
     .ieFoot button:disabled { opacity: .4; cursor: default; }
     #ieSave { background: #3d7a3d; }
+    #ieCancel { background: #D3D3D3;color:black }
     #ieSave:hover { background: #4a8f4a; }
+    #ieCancel:hover { background: white; }
     #ieSave:disabled { background: #555; }
 
     /* Editor metadati OPF (solo libri da cartella): modale centrato */
@@ -533,8 +537,40 @@
     #metaSave:hover { background: #4a8f4a; }
     #metaSave:disabled { background: #555; }
 
-    /* Report costruzione EPUB (modale centrato): DIFFERITO, verra' aggiunto
-       insieme al backend build_epub (vedi pulsante "Crea EPUB" nel port Nim). */
+    /* Report costruzione EPUB (modale centrato) */
+    #buildReport {
+      display: none;
+      position: fixed;
+      z-index: 1150;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 660px;
+      max-width: 94vw;
+      max-height: 82vh;
+      flex-direction: column;
+      background: #262626;
+      border: 1px solid #666;
+      border-radius: 8px;
+      box-shadow: 0 6px 24px rgba(0,0,0,.55);
+      overflow: hidden;
+      font-size: 13px;
+    }
+    #buildReport.open { display: flex; }
+    #buildReportText {
+      flex: 1;
+      min-height: 180px;
+      max-height: 62vh;
+      overflow: auto;
+      padding: 12px 14px;
+      margin: 0;
+      background: #1e1e1e;
+      color: #dcdcdc;
+      font-family: Consolas, 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre;
+    }
 
     #status {
       position: fixed;
@@ -560,6 +596,7 @@
     <button id="spreadToggle" disabled>Una pagina</button>
     <button id="reloadBtn" title="Ricarica il capitolo corrente dal disco (libri da cartella: mostra la traduzione salvata dal translator)" disabled>⟳ Ricarica</button>
     <button id="metaEditBtn" title="Modifica i metadati dell'EPUB (solo libri da cartella)" disabled>⚙ Metadati</button>
+    <button id="buildBtn" title="Assembla un EPUB ben formato dalla cartella tradotta (come build_epub.py): mimetype non compresso, fallback sul tedesco per i capitoli non tradotti, dc:language -> it" disabled>📦 Crea EPUB</button>
     <select id="widthSelect" title="Larghezza massima pagina">
     <option value="30">30%</option>
     <option value="35">35%</option>
@@ -604,14 +641,17 @@
     <div id="ieHandle" title="Trascina per spostare">☰ ☰ ☰</div>
     <div class="ieHead">
       <span id="ieTitle">Modifica paragrafo</span>
+       <button id="ieSave">💾 Salva</button>
+       <button id="ieCancel">Annulla</button>
       <button id="ieClose" title="Chiudi (Esc)">✕</button>
     </div>
     <textarea id="ieCode" spellcheck="false"></textarea>
+    <!--<div class="ieHint">Un elemento per riga: es. <b>&lt;p&gt;prima parte&lt;/p&gt;&lt;p&gt;seconda parte&lt;/p&gt;</b></div>-->
     <div class="ieFoot">
-      <button id="ieCancel">Annulla</button>
-      <button id="ieSave">💾 Salva</button>
+      <!--<button id="ieCancel">Annulla</button>
+      <button id="ieSave">💾 Salva</button>-->
+      <span>&nbsp;&nbsp;</span>
     </div>
-    <div class="ieHint">Un elemento per riga: per spezzare il paragrafo o aggiungerne altri in coda scrivi più tag, es. <b>&lt;p&gt;prima parte&lt;/p&gt;&lt;p&gt;seconda parte&lt;/p&gt;</b></div>
     <div id="ieGrip" title="Ridimensiona"></div>
   </div>
 
@@ -627,6 +667,18 @@
       <span id="metaPath"></span>
       <button id="metaCancel">Annulla</button>
       <button id="metaSave">💾 Salva</button>
+    </div>
+  </div>
+
+  <!-- Report costruzione EPUB (port di build_epub.py) -->
+  <div id="buildReport" aria-hidden="true">
+    <div class="metaHead">
+      <span>Report costruzione EPUB</span>
+      <button id="buildReportClose" title="Chiudi (Esc)">✕</button>
+    </div>
+    <pre id="buildReportText"></pre>
+    <div class="metaFoot">
+      <button id="buildReportOk">OK</button>
     </div>
   </div>
 
@@ -679,6 +731,13 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
+      }).then(function (r) { return r.json(); });
+    }
+    function apiBuildEpub() {
+      return fetch("/api/build_epub", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(null)
       }).then(function (r) { return r.json(); });
     }
 
@@ -915,7 +974,7 @@
     function openBook(url) {
       closeInlineEditor(); // il popover in-context appartiene al libro precedente
       closeMetaEditor();  // idem per l'editor dei metadati
-      // (build EPUB "Crea EPUB" / buildReport: differito, verra' aggiunto in seguito)
+      closeBuildReport(); // e per il report di costruzione EPUB
       if (book) {
         try {
           book.destroy();
@@ -937,6 +996,7 @@
       if (isFolderBook()) installArchiveShim();
       document.getElementById("reloadBtn").disabled = !isFolderBook();
       document.getElementById("metaEditBtn").disabled = !isFolderBook();
+      document.getElementById("buildBtn").disabled = !isFolderBook();
       rendition = book.renderTo("viewer", {
         width: "100%",
         height: "100%",
@@ -1275,6 +1335,72 @@
     }
 
     document.getElementById("metaEditBtn").addEventListener("click", openMetaEditor);
+
+    // ==================================================================
+    // Costruzione EPUB da cartella (port di build_epub.py)
+    // ==================================================================
+    // Il bottone "Crea EPUB" lancia la routine Flask equivalente a
+    // build_epub.py: assembla un EPUB ben formato (mimetype STORED per
+    // primo, fallback sul sorgente tedesco per i capitoli non tradotti,
+    // dc:language -> it) e scrive <cartella-target>.epub accanto al target.
+    var buildReport = document.getElementById("buildReport");
+    var buildReportText = document.getElementById("buildReportText");
+
+    function showBuildReport(res) {
+      var lines = [];
+      lines.push("=== FILE NELL'EPUB ===");
+      (res.files || []).forEach(function (f) {
+        var note = f.note ? "  — " + f.note : "";
+        lines.push("  " + (note ? "⚠ " : "  ") + f.name +
+          "  (" + formatSize(f.size) + ")" + note);
+      });
+      lines.push("");
+      lines.push("=== RIEPILOGO ===");
+      lines.push("File inclusi ............ " + res.fileCount);
+      lines.push("  capitoli dal target ... " + res.capTarget);
+      lines.push("  capitoli in fallback ... " + res.capFallback + " (tedesco)");
+      lines.push("Dimensione ............. " + formatSize(res.size));
+      lines.push("Output ................. " + res.output);
+      if (res.problems && res.problems.length) {
+        lines.push("");
+        lines.push("=== PROBLEMI RILEVATI ===");
+        res.problems.forEach(function (p) { lines.push("  ✗ " + p); });
+      } else {
+        lines.push("");
+        lines.push("✅ EPUB valido: " + res.output);
+      }
+      buildReportText.textContent = lines.join("\n");
+      buildReport.classList.add("open");
+      buildReport.setAttribute("aria-hidden", "false");
+    }
+
+    function closeBuildReport() {
+      buildReport.classList.remove("open");
+      buildReport.setAttribute("aria-hidden", "true");
+    }
+
+    document.getElementById("buildReportClose").addEventListener("click", closeBuildReport);
+    document.getElementById("buildReportOk").addEventListener("click", closeBuildReport);
+
+    document.getElementById("buildBtn").addEventListener("click", function () {
+      var btn = document.getElementById("buildBtn");
+      btn.disabled = true;
+      setStatus("Costruzione dell'EPUB in corso…");
+      apiBuildEpub().then(function (res) {
+        btn.disabled = !isFolderBook();
+        if (res && res.ok) {
+          setStatus("EPUB creato ✓ (" + res.output + ")");
+        } else if (res && res.error) {
+          setStatus("Errore nella costruzione: " + res.error);
+        } else {
+          setStatus("Costruzione terminata: vedi il report.");
+        }
+        showBuildReport(res || {});
+      }).catch(function (err) {
+        btn.disabled = !isFolderBook();
+        setStatus("Errore del server: " + err);
+      });
+    });
     document.getElementById("metaClose").addEventListener("click", closeMetaEditor);
     document.getElementById("metaCancel").addEventListener("click", closeMetaEditor);
 
@@ -1317,14 +1443,6 @@
         setStatus("Errore del server: " + err);
       });
     });
-
-    // ==================================================================
-    // Costruzione EPUB da cartella (port di build_epub.py): DIFFERITO.
-    // Il pulsante "Crea EPUB" (buildBtn), il pannello #buildReport e la
-    // chiamata api.buildEpub verranno aggiunti in seguito, insieme al
-    // backend Flask equivalente (mimetype STORED per primo, fallback sul
-    // tedesco per i capitoli non tradotti, dc:language -> it).
-    // ==================================================================
 
     // Sidebar: toggle on/off del browser del pacchetto EPUB
     document.getElementById("filesToggle").addEventListener("click", function () {
@@ -1458,6 +1576,7 @@
       else if (e.key === "Escape") {
         if (inlineEditor.classList.contains("open")) { closeInlineEditor(); return; }
         if (metaEditor.classList.contains("open")) { closeMetaEditor(); return; }
+        if (buildReport.classList.contains("open")) { closeBuildReport(); return; }
         closeLibrary();
         document.getElementById("sidebar").classList.remove("open");
         document.getElementById("filesToggle").classList.remove("active");
@@ -2049,6 +2168,11 @@
 
     // All'avvio carica l'elenco dei libri serviti da Flask
     loadBookList();
+
+    // PWA: registrazione service worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js');
+    }
   </script>
 </body>
 </html>
