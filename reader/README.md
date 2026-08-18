@@ -67,6 +67,30 @@ input that overrides the default padding with a percentage of the page width
 - the server validates the book name (basename only) and the entry path (no
   `..` traversal) before touching the file.
 
+### Content zoom (A+ / A− / 100%)
+The **A+**, **A−** and **100%** buttons zoom the EPUB reading content without
+enlarging the browser chrome (toolbar, tabs, sidebars) or overflowing the
+viewport.
+
+The original implementation applied CSS `zoom` to `documentElement`
+(`:root`), which scaled the **entire page** including `<body>` (whose
+`height:100dvh` also scaled), forcing the viewer to grow beyond the screen.
+A counter-zoom (`zoom:1/Z`) was applied to every chrome element to keep them
+visually unchanged — it worked, but the layout viewport still overflowed on
+zoom-in because the body's CSS-pixel height grew with the zoom factor.
+
+The fix moves the CSS `zoom` from `:root` to the `#viewer` element only.
+Because `#viewer` is a flex child with `flex:1`, its layout box is determined
+by the flex algorithm and **does not change** when CSS `zoom` is applied to
+it — `zoom` only affects visual rendering, not the element's own layout
+metrics (`clientWidth`/`offsetWidth`).  The chrome elements are never zoomed
+and need no counter-zoom.  `#viewer` uses `overflow:auto`, so any content
+that extends beyond the viewer box after zoom-in can be scrolled.
+
+epub.js measures the container via `clientWidth`/`offsetWidth`, which return
+CSS-pixel dimensions **before** the element's own CSS `zoom` is applied, so
+column pagination remains correct at every zoom level.
+
 ### Navigation
 - **‹ Previous / Next ›** buttons
 - **← / →** arrow keys

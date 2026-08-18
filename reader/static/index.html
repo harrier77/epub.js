@@ -23,7 +23,7 @@
       color: #eee;
       height: 100vh;   /* fallback per browser senza supporto dvh */
       height: 100dvh;  /* altezza realmente disponibile: segue la barra URL del browser mobile */
-      overflow: hidden; /* il documento non può scorrere né essere trascinato */
+      overflow: hidden; /* body must not scroll: zoom is now on #viewer only */
       display: flex;
       flex-direction: column;
     }
@@ -214,7 +214,9 @@
       width: 100%;
       background: #fafafa;
       box-shadow: 0 0 30px rgba(0,0,0,.5);
-      overflow: hidden;
+      /* overflow:auto allows scrolling when CSS zoom enlarges epub content
+         beyond the viewer box (zoom is applied to #viewer, not :root). */
+      overflow: auto;
       touch-action: none; /* niente panning nativo: i gesti li gestisce epub.js */
     }
 
@@ -282,19 +284,15 @@
       padding: 3% 3%; /* margine attorno all'area di lettura; epub.js sottrae il padding del container dalla size */
     }
 
-    /* Zoom della pagina (equivalente browser dello zoom WebView2 del port Nim):
-       CSS `zoom` su documentElement scala l'intera pagina; il "chrome" fisso viene
-       contro-ruotato con zoom 1/Z per restare visivamente invariato. #viewer resta
-       a zoom 1: epub.js misura (clientWidth/offsetWidth) in CSS px coerenti con lo
-       zoom. #inlineEditor è escluso: si posiziona con le rect del contenuto letto. */
-    :root {
-      --app-zoom: 1;
-      --chrome-zoom: 1;
-    }
-    #toolbar, #tabs, #status, #editorPanel,
-    #sidebar, #librarySidebar, #metaEditor, #buildReport {
-      zoom: var(--chrome-zoom);
-    }
+    /* ZOOM: CSS zoom is applied ONLY to #viewer (not :root), so the browser
+       chrome (toolbar, tabs, sidebar, etc.) stays at zoom 1 and never overflows
+       the viewport.  The old approach zoomed :root and counter-rotated chrome
+       elements with zoom:1/Z — that caused body (height:100dvh) to grow
+       beyond the viewport on zoom-in.  By zooming #viewer directly, the flex
+       layout and body dimensions are unaffected; #viewer uses overflow:auto
+       so zoomed content can be scrolled.  epub.js measures container CSS px
+       (clientWidth/offsetWidth), which are NOT affected by CSS zoom on the
+       element itself, so pagination stays correct. */
 
     /* Popover editing in-context (paragrafo cliccato nel viewer) */
     #inlineEditor {
@@ -718,9 +716,7 @@
     //   nell'epub, o nel file della cartella esterna; "silent" è accettato per
     //   compatibilità con il frontend condiviso, non ha effetti lato server:
     //   il ri-render è client-side)
-    // setZoom({factor}) → zoom CSS lato browser (equivalente dello zoom
-    //   WebView2 del port Nim): documentElement.style.zoom scala l'intera
-    //   pagina, il chrome viene contro-ruotato dalle variabili CSS --chrome-zoom.
+    // setZoom removed: CSS zoom now targets #viewer only (see applyZoom()).
     window.api = {};
 
     function apiListBooks() {
@@ -741,13 +737,9 @@
       }).then(function (r) { return r.json(); });
     }
 
-    // Zoom: il server Flask non può zoomare il browser, quindi lo zoom
-    // avviene via CSS su tutta la pagina (come mio_setZoomFactor del port Nim).
-    api.setZoom = function (payload) {
-      var z = Math.min(2, Math.max(0.75, payload && payload.factor ? payload.factor : 1));
-      document.documentElement.style.zoom = z;
-      return Promise.resolve({ ok: true, factor: z });
-    };
+    // ZOOM NOTE: api.setZoom was removed.  CSS zoom is now applied directly
+    // to #viewer (not documentElement), so the browser chrome is never zoomed
+    // and the viewport dimensions stay stable.  See applyZoom() below.
 
     function setStatus(msg) {
       statusEl.textContent = msg;
@@ -1129,25 +1121,28 @@
         spreadOn ? "Una pagina" : "Due pagine";
     });
 
-    // Zoom browser (WebView2) applicato dal backend: qui si gestiscono stato,
-    // variabili CSS (controrotazione del chrome) e rifluizione del lettore.
+    // ZOOM: CSS zoom applied directly to #viewer only (not :root).
+    // This keeps the browser chrome (toolbar, tabs, sidebar) at normal size
+    // and avoids viewport overflow.  epub.js measures container CSS px via
+    // clientWidth/offsetWidth, which are NOT scaled by CSS zoom on the
+    // element itself, so column pagination remains correct.
+    // #viewer has overflow:auto, so zoomed content that exceeds the box
+    // can be scrolled.
     var readerZoom = 1, ZOOM_MIN = 0.75, ZOOM_MAX = 2, ZOOM_STEP = 0.25;
     function applyZoom(z) {
       if (!rendition) return;
       z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
       readerZoom = z;
-      document.documentElement.style.setProperty("--app-zoom", z);
-      document.documentElement.style.setProperty("--chrome-zoom", 1 / z);
+      // Apply zoom to the viewer element only — the rest of the page is untouched.
+      viewer.style.zoom = z;
       document.getElementById("zoomReset").textContent = Math.round(z * 100) + "%";
-      api.setZoom({ factor: z }).then(function () {
-        // Lo zoom WebView2 è applicato: attendi un frame (le misure in CSS px
-        // sono aggiornate) e rifluisci come accade su resize di finestra.
-        requestAnimationFrame(function () {
-          if (rendition) rendition.resize();
-        });
-      }).catch(function (err) { setStatus("Errore zoom: " + err); });
+      // Wait one frame for CSS zoom to take effect, then tell epub.js to
+      // re-measure and reflow columns (same as a window resize).
+      requestAnimationFrame(function () {
+        if (rendition) rendition.resize();
+      });
     }
-   document.getElementById("zoomOut").addEventListener("click", function () { applyZoom(readerZoom - ZOOM_STEP); });
+    document.getElementById("zoomOut").addEventListener("click", function () { applyZoom(readerZoom - ZOOM_STEP); });
     document.getElementById("zoomReset").addEventListener("click", function () { applyZoom(1); });
     document.getElementById("zoomIn").addEventListener("click", function () { applyZoom(readerZoom + ZOOM_STEP); });
 
