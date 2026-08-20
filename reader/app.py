@@ -63,7 +63,7 @@ def _load_config():
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             config.write(f)
 
-        return {"book_dir": config["paths"].get("book_dir", "").strip(),
+        return {"book_dir": os.path.expanduser(config["paths"].get("book_dir", "").strip()),
                 "namespace": config}
     except Exception:  # in caso di errori cadiamo sui default iniettabili
         return {"book_dir": defaults_book_dir, "namespace": None}
