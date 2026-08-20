@@ -32,12 +32,53 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+
+# File di configurazione dell'utente: ~/.epubreader/config.ini
+# Se non esiste viene creato al primo avvio con i valori di default.
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".epubreader")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.ini")
+
+
+def _load_config():
+    """Crea (se manca) e legge la configurazione utente ~/.epubreader/config.ini.
+
+    Restituisce un dict con la chiave 'book_dir' (la cartella esterna con
+    l'epub non impacchettato) e 'namespace' (oggetto configparser, None se
+    si e' caduti sui default a causa di un errore).
+    """
+    import configparser
+
+    defaults_book_dir = r"..\translator\target"
+
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        config = configparser.ConfigParser()
+        config.read(CONFIG_FILE, encoding="utf-8")
+
+        if not config.has_section("paths"):
+            config.add_section("paths")
+        if not config.has_option("paths", "book_dir"):
+            config["paths"]["book_dir"] = defaults_book_dir
+
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            config.write(f)
+
+        return {"book_dir": config["paths"].get("book_dir", "").strip(),
+                "namespace": config}
+    except Exception:  # in caso di errori cadiamo sui default iniettabili
+        return {"book_dir": defaults_book_dir, "namespace": None}
+
+
+# Cartella esterna con un EPUB non impacchettato (output del translator).
+# Viene letta da ~/.epubreader/config.ini ed e' sovrascrivibile con
+# --book-dir per questa singola esecuzione (usa --book-dir "" per
+# disabilitarla).
+CONFIG = _load_config()
+DEFAULT_BOOK_DIR = CONFIG["book_dir"]
+
 SAMPLE_URL = "https://s3.amazonaws.com/epubjs/books/alice.epub"
 SAMPLE_FILE = os.path.join(STATIC_DIR, "book.epub")
 
-# Cartella esterna con un EPUB non impacchettato (output del translator).
-# Sovrascrivibile con --book-dir (usa --book-dir "" per disabilitarla).
-DEFAULT_BOOK_DIR = r"C:\Users\pr30565\Desktop\python\translator\target"
 # Chiave usata dal frontend per identificare il libro-cartella in /api/books
 # e in /api/save_chapter (corrisponde alla URL "/ext/").
 FOLDER_BOOK_KEY = "ext"
