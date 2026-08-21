@@ -63,10 +63,18 @@ def _load_config():
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             config.write(f)
 
+        epub_files_raw = config["paths"].get("epub_files", "").strip()
+        epub_files = [
+            os.path.expanduser(p.strip())
+            for p in epub_files_raw.split(",")
+            if p.strip()
+        ]
+
         return {"book_dir": os.path.expanduser(config["paths"].get("book_dir", "").strip()),
+                "epub_files": epub_files,
                 "namespace": config}
     except Exception:  # in caso di errori cadiamo sui default iniettabili
-        return {"book_dir": defaults_book_dir, "namespace": None}
+        return {"book_dir": defaults_book_dir, "epub_files": [], "namespace": None}
 
 
 # Cartella esterna con un EPUB non impacchettato (output del translator).
@@ -75,6 +83,7 @@ def _load_config():
 # disabilitarla).
 CONFIG = _load_config()
 DEFAULT_BOOK_DIR = CONFIG["book_dir"]
+DEFAULT_EPUB_FILES = CONFIG["epub_files"]
 
 SAMPLE_URL = "https://s3.amazonaws.com/epubjs/books/alice.epub"
 SAMPLE_FILE = os.path.join(STATIC_DIR, "book.epub")
@@ -84,6 +93,7 @@ SAMPLE_FILE = os.path.join(STATIC_DIR, "book.epub")
 FOLDER_BOOK_KEY = "ext"
 
 BOOK_DIR = None  # impostato da main() in base a --book-dir
+EPUB_FILES = None  # lista di path epub esterni da config.ini
 
 # Cache del bundle CSS (concatenazione di tutti gli styles/*.css): chiave =
 # max mtime dei file, cosi' se il translator rigenera i css il bundle si
@@ -156,6 +166,22 @@ def ext_files(filename):
 
     resp = send_from_directory(BOOK_DIR, filename)
     resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/extepub/<int:index>/book.epub")
+def extepub_file(index):
+    """Serve un singolo epub esterno elencato in config.ini (epub_files)."""
+    if not EPUB_FILES or index < 0 or index >= len(EPUB_FILES):
+        return jsonify(ok=False, error="Epub esterno non valido"), 404
+    epub_path = EPUB_FILES[index]
+    if not os.path.isfile(epub_path):
+        return jsonify(ok=False, error="File non trovato: " + epub_path), 404
+    directory = os.path.dirname(epub_path)
+    filename = os.path.basename(epub_path)
+    resp = send_from_directory(directory, filename)
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Content-Type"] = "application/epub+zip"
     return resp
 
 
@@ -262,7 +288,22 @@ def list_books():
             }
         )
 
-    # 2) File .epub in static/
+    # 2) File .epub esterni elencati in config.ini (epub_files)
+    if EPUB_FILES:
+        for idx, epub_path in enumerate(EPUB_FILES):
+            if os.path.isfile(epub_path):
+                label = os.path.basename(epub_path)
+                books.append(
+                    {
+                        "name": "extepub:" + str(idx),
+                        "title": epub_title(epub_path) or os.path.splitext(label)[0],
+                        "url": "/extepub/" + str(idx) + "/book.epub",
+                        "size": os.path.getsize(epub_path),
+                        "type": "extepub",
+                    }
+                )
+
+    # 3) File .epub in static/
     for name in sorted(os.listdir(STATIC_DIR)):
         if name.lower().endswith(".epub"):
             path = os.path.join(STATIC_DIR, name)
@@ -307,8 +348,11 @@ def save_chapter():
     # Validazione del nome libro: la chiave del libro-cartella ("/ext/") oppure
     # un basename .epub esistente in static/
     is_folder = book_name.rstrip("/") == FOLDER_BOOK_KEY
+    extepub_match = re.match(r"^extepub:(\d+)$", book_name)
+    is_extepub = extepub_match is not None
     if not book_name or (
         not is_folder
+        and not is_extepub
         and (
             book_name != os.path.basename(book_name)
             or "/" in book_name
@@ -354,7 +398,14 @@ def save_chapter():
             return jsonify(ok=False, error="Errore durante la scrittura: " + str(exc))
         return jsonify(ok=True)
 
-    book_path = os.path.join(STATIC_DIR, book_name)
+    # Modalita' epub esterno (epub_files da config.ini)
+    if is_extepub:
+        idx = int(extepub_match.group(1))
+        if not EPUB_FILES or idx < 0 or idx >= len(EPUB_FILES):
+            return jsonify(ok=False, error="Epub esterno non valido: " + book_name)
+        book_path = EPUB_FILES[idx]
+    else:
+        book_path = os.path.join(STATIC_DIR, book_name)
     if not os.path.isfile(book_path):
         return jsonify(ok=False, error="File non trovato: " + book_name)
 
@@ -506,8 +557,9 @@ def main():
     )
     args = parser.parse_args()
 
-    global BOOK_DIR
+    global BOOK_DIR, EPUB_FILES
     BOOK_DIR = (args.book_dir or "").strip() or None
+    EPUB_FILES = DEFAULT_EPUB_FILES if DEFAULT_EPUB_FILES else None
     if BOOK_DIR:
         if os.path.isdir(BOOK_DIR):
             print(f"Epub da cartella: {BOOK_DIR}  (su /ext/)")
@@ -517,6 +569,16 @@ def main():
                 file=sys.stderr,
             )
             BOOK_DIR = None
+    if EPUB_FILES:
+        valid = [p for p in EPUB_FILES if os.path.isfile(p)]
+        if valid:
+            EPUB_FILES = valid
+            print(f"Epub esterni ({len(valid)}):")
+            for p in valid:
+                print(f"  - {p}")
+        else:
+            print("AVVISO: nessun epub esterno trovato among epub_files", file=sys.stderr)
+            EPUB_FILES = None
 
     ensure_sample_book()
     print(f"\nApri il browser su: http://{args.host}:{args.port}\n")
