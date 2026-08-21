@@ -21,12 +21,15 @@ ricompilare l'epub. Il pulsante "⟳ Ricarica" rilegge il capitolo corrente.
 """
 
 import argparse
+import json
 import os
 import re
 import sys
 import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
+
+from datetime import datetime
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
@@ -87,6 +90,11 @@ DEFAULT_EPUB_FILES = CONFIG["epub_files"]
 
 SAMPLE_URL = "https://s3.amazonaws.com/epubjs/books/alice.epub"
 SAMPLE_FILE = os.path.join(STATIC_DIR, "book.epub")
+
+# Posizioni di lettura per libro: ~/.epubreader/positions.json. E' una mappa
+# {book_key: {"cfi": ..., "href": ..., "anchor": ..., "updated": ...}}:
+# ogni libro ricorda la sua posizione indipendentemente dagli altri.
+POSITIONS_FILE = os.path.join(CONFIG_DIR, "positions.json")
 
 # Chiave usata dal frontend per identificare il libro-cartella in /api/books
 # e in /api/save_chapter (corrisponde alla URL "/ext/").
@@ -263,6 +271,89 @@ def rewrite_xhtml_css_links(text, chapter_dir, root):
 @app.route("/api/health")
 def health():
     return jsonify(status="ok")
+
+
+def _valid_book_key(book):
+    """True se `book` e' una chiave libro valida (stessa regola di
+    /api/save_chapter): "ext", "extepub:N" o basename .epub."""
+    if not book:
+        return False
+    if book.rstrip("/") == FOLDER_BOOK_KEY:
+        return True
+    if re.match(r"^extepub:\d+$", book):
+        return True
+    return (
+        book == os.path.basename(book)
+        and "/" not in book
+        and "\\" not in book
+        and ".." not in book
+        and book.lower().endswith(".epub")
+    )
+
+
+def _load_positions():
+    """Legge positions.json; ritorna {} se assente o corrotto."""
+    try:
+        with open(POSITIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+@app.route("/api/get_position")
+def get_position():
+    """Ritorna la posizione salvata per un libro.
+
+    Query: ?book=<book_key>. Risposta: {"ok": true, "position": {...}} oppure
+    {"ok": true, "position": null} se il libro non ha una posizione salvata.
+    """
+    book = request.args.get("book", "")
+    if not _valid_book_key(book):
+        return jsonify(ok=False, error="Nome libro non valido")
+    pos = _load_positions().get(book)
+    return jsonify(ok=True, position=pos if isinstance(pos, dict) else None)
+
+
+@app.route("/api/save_position", methods=["POST"])
+def save_position():
+    """Salva la posizione di lettura di un libro in positions.json.
+
+    Richiesta JSON: {"book": <book_key>, "cfi": "epubcfi(...)",
+                     "href": "OEBPS/cap.xhtml", "anchor": "testo..."}
+    Scrittura atomica (.tmp + os.replace), come /api/save_chapter.
+    Risposta: {"ok": true} oppure {"ok": false, "error": "..."}
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify(ok=False, error="Richiesta JSON non valida"), 400
+    book = str(data.get("book", ""))
+    if not _valid_book_key(book):
+        return jsonify(ok=False, error="Nome libro non valido: " + book)
+
+    pos = {
+        "cfi": str(data.get("cfi", "")),
+        "href": str(data.get("href", "")),
+        "anchor": str(data.get("anchor", ""))[:100],
+        "updated": datetime.now().isoformat(timespec="seconds"),
+    }
+    positions = _load_positions()
+    positions[book] = pos
+
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    tmp_path = POSITIONS_FILE + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(positions, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, POSITIONS_FILE)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return jsonify(ok=False, error="Errore durante la scrittura: " + str(exc))
+    return jsonify(ok=True)
 
 
 @app.route("/api/books")
