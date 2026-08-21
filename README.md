@@ -49,6 +49,25 @@ Flask backend replacing the bridge):
 - the toolbar also gained a **Pad %** input that overrides the default
   body padding with a percentage of the page width.
 
+### In-context fragment editing
+
+Clicking a paragraph in the reader prepares a small popover (open it with the
+**Paragrafo selezionato** button) that offers two modes:
+
+- **Frammento** (default) — shows only the text you need to fix. A plain click
+  loads the whole clicked text node; if you **drag-select** some text instead
+  (even across inline tags such as `<i>` or `<b>`), the field contains *exactly*
+  the selected characters, delimited by Range start/end offsets. The auto-height
+  textarea grows with the content (up to 12 lines);
+- **Intero** — the raw HTML of the whole paragraph, for structural fixes.
+
+Saving applies the edited string back to the underlying text nodes only
+(head/tail preserved, intermediate nodes blanked when the selection spans more
+than one node), so tags and attributes can never break, then reuses the normal
+save pipeline (`buildEditedChapter` → `POST /api/save_chapter` → archive patch
+→ re-render at the same CFI). Closing without saving restores the original DOM,
+leaving no unsaved changes visible in the rendering.
+
 ### Fixes applied in this fork
 
 1. **JSZip must be loaded *before* `epub.js`** — `webpack.config.js` declares `jszip/dist/jszip` as an *external* dependency (`externals: { "jszip/dist/jszip": "JSZip" }`), so the built bundle expects a global `window.JSZip` at runtime. Without it, `new JSZip()` inside `Archive.checkRequirements()` throws `"JSZip lib not loaded"` and the page stays blank. The official examples load it from a CDN; this fork serves a local copy from `node_modules` (`jszip.min.js`, v3.7.1) so the app works offline.
