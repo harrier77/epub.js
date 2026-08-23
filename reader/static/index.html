@@ -425,8 +425,10 @@
       background: #1e1e1e;
       color: #dcdcdc;
       font-family: Consolas, 'Courier New', monospace;
-      font-size: calc(11px * var(--ui-scale));
-      line-height: 1.2;
+      /* Stessa dimensione e interlinea della vista frammento (textarea.ieFrag):
+         le due modalità del popover devono avere font identici */
+      font-size: calc(13px * var(--ui-scale));
+      line-height: 1.45;
       tab-size: 2;
       white-space: pre-wrap;   /* testo a capo invece dello scroll orizzontale */
       overflow-wrap: break-word;
@@ -1989,6 +1991,22 @@
       var doc = contents && contents.document;
       if (!doc || inlineBoundDocs.has(doc)) return;
       inlineBoundDocs.add(doc);
+      // Su mobile la selezione viene collassata PRIMA dell'evento click (e il
+      // menu nativo Copia/Cerca/Traduci puo' intercettare il gesto): salviamo
+      // l'ultimo Range non collassato su TUTTI gli eventi che precedono il
+      // collassamento, cosi' il popover puo' mostrare solo il frammento anche
+      // se al momento del click la selezione e' gia' vuota.
+      function snapshotSel() {
+        try {
+          var s = doc.getSelection();
+          if (s && s.rangeCount && !s.isCollapsed) {
+            doc.__lastSelRange = s.getRangeAt(0).cloneRange();
+          }
+        } catch (e) {}
+      }
+      ["selectionchange", "pointerdown", "pointerup", "touchstart", "touchend", "mouseup"].forEach(function (t) {
+        doc.addEventListener(t, snapshotSel, true);
+      });
       doc.addEventListener("click", function (e) {
         if (e.button && e.button !== 0) return;              // solo click sinistro
         // Popover aperto: i click nel libro NON devono chiuderlo ne' sostituire
@@ -2052,7 +2070,7 @@
       inlineCtx.origAll = inlineCtx.allTextNodes.map(function (n) { return n.nodeValue; });
       // Span ESATTO della selezione (nodi+offset), catturato PRIMA di ogni
       // spostamento di focus che potrebbe svuotare la selezione del documento.
-      inlineCtx.selSpan = captureSelectionSpan(contents, el);
+      inlineCtx.selSpan = captureSelectionSpan(contents, el, ev);
       // Nodo testo cliccato (dal caret della selezione o dal target del click)
       inlineCtx.fragIndex = clickedTextNodeIndex(inlineCtx.textNodes, contents, el, ev);
       // HTML grezzo del paragrafo: usato solo in modalita' "Intero"
@@ -2159,12 +2177,47 @@
     // nodi testo + offset di inizio/fine e stringa selezionata. Null se la
     // selezione e' vuota, fuori dal paragrafo o senza testo utile. Gli estremi
     // fuori dal blocco vengono clampati ai bordi del paragrafo stesso.
-    function captureSelectionSpan(contents, el) {
+    function captureSelectionSpan(contents, el, ev) {
       try {
         var doc = contents.document;
         var sel = doc.getSelection();
-        if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
-        var r = sel.getRangeAt(0);
+        var r = (sel && sel.rangeCount && !sel.isCollapsed) ? sel.getRangeAt(0) : null;
+        // Mobile: la selezione e' stata gia' collassata dal tap. Se esiste una
+        // selezione salvata da selectionchange e il punto del click cade DENTRO
+        // quella selezione, usiamo quella invece di rinunciare al frammento.
+        if (!r && ev && typeof ev.clientX === "number") {
+          var saved = doc.__lastSelRange;
+          if (saved) {
+            var pt = null;
+            try {
+              // La selezione salvata deve riguardare QUESTO paragrafo...
+              if (!(saved.startContainer === el || el.contains(saved.startContainer))) { saved = null; }
+            } catch (e2) { saved = null; }
+          }
+          if (saved) {
+            try {
+              // Punto esatto del tap (se ricavabile): basta che cada dentro
+              // la selezione salvata O nel suo bounding rect (margine 12px
+              // per imprecisione del tocco e maniglie di selezione).
+              if (doc.caretRangeFromPoint) pt = doc.caretRangeFromPoint(ev.clientX, ev.clientY);
+              else if (doc.caretPositionFromPoint) {
+                var cp = doc.caretPositionFromPoint(ev.clientX, ev.clientY);
+                if (cp) { pt = doc.createRange(); pt.setStart(cp.offsetNode, cp.offset); pt.collapse(true); }
+              }
+              var hit = false;
+              try { if (pt && saved.comparePoint(pt.startContainer, pt.startOffset) === 0) hit = true; } catch (e3) {}
+              if (!hit) {
+                var rc = saved.getBoundingClientRect();
+                var M = 12;
+                if (rc && rc.width + rc.height > 0 &&
+                    ev.clientX >= rc.left - M && ev.clientX <= rc.right + M &&
+                    ev.clientY >= rc.top - M && ev.clientY <= rc.bottom + M) hit = true;
+              }
+              if (hit) r = saved;
+            } catch (e4) {}
+          }
+        }
+        if (!r) return null;
         var sc = r.startContainer, so = r.startOffset;
         var ec = r.endContainer, eo = r.endOffset;
         var inS = sc === el || el.contains(sc);
@@ -2176,7 +2229,16 @@
         if (!all.length) return null;
         var s = normTextPoint(doc, all, sc, so, false);
         var e = normTextPoint(doc, all, ec, eo, true);
-        if (!s || !e) return null;
+        if (!s || !e) {
+          // Ultimo fallback (mobile): nessuna selezione recuperabile, ma dal
+          // punto del tap conosciamo il caret -> estraiamo la FRASE cliccata.
+          // Non dipende da eventi di selezione, quindi funziona anche dopo
+          // che il browser ha collassato/svuotato la selezione o l'ha
+          // "consumata" col menu Copia/Traduci.
+          var sent = captureSentenceAtPoint(doc, all, ev, el);
+          if (sent) return sent;
+          return null;
+        }
         var si = all.indexOf(s.n), ei = all.indexOf(e.n);
         if (si > ei || (si === ei && e.o <= s.o)) return null; // span degenerato
         var parts = [];
@@ -2188,6 +2250,46 @@
         var text = parts.join("").replace(/\s*[\r\n]+\s*/g, " ");
         if (!text.trim()) return null;
         return { sNode: s.n, sOff: s.o, eNode: e.n, eOff: e.o, text: text };
+      } catch (err) { return null; }
+    }
+
+    // Estrae la frase di testo cliccata usando SOLO le coordinate del tap:
+    // trova il caret, poi espande ai confini di frase (.!?… seguito da spazio/
+    // fine) dentro lo stesso nodo testo. Ritorna lo stesso formato dello span
+    // di selezione ({ sNode, sOff, eNode, eOff, text }) cosi' l'editing e il
+    // salvataggio restano identici.
+    function captureSentenceAtPoint(doc, all, ev, el) {
+      try {
+        var pt = null;
+        if (ev && typeof ev.clientX === "number") {
+          if (doc.caretRangeFromPoint) pt = doc.caretRangeFromPoint(ev.clientX, ev.clientY);
+          else if (doc.caretPositionFromPoint) {
+            var cp = doc.caretPositionFromPoint(ev.clientX, ev.clientY);
+            if (cp) { pt = doc.createRange(); pt.setStart(cp.offsetNode, cp.offset); pt.collapse(true); }
+          }
+        }
+        if (!pt || pt.startContainer.nodeType !== 3) return null;
+        var tn = pt.startContainer;
+        if (!(tn === el || el.contains(tn))) return null;
+        var txt = String(tn.nodeValue || "");
+        var i = Math.min(Math.max(pt.startOffset, 0), txt.length);
+        // Se il tap e' subito dopo un terminatore, arretra sull'ultima parola
+        while (i > 0 && /[.!?…\s]/.test(txt[i - 1]) && !/[.!?…]/.test(txt[i] || "")) i--;
+        var a = i, b = i;
+        while (a > 0 && !/[.!?…]\s/.test(txt.slice(Math.max(0, a - 2), a)) ) {
+          if (a > 1 && /[.!?…]/.test(txt[a - 2]) && /\s/.test(txt[a - 1])) { a--; break; }
+          a--;
+        }
+        var n = txt.length;
+        while (b < n) {
+          if (b >= 1 && /[.!?…]/.test(txt[b - 1]) && (/\s/.test(txt[b]) || b === n)) break;
+          if (b === n - 1 && /[.!?…]/.test(txt[b])) { b++; break; }
+          b++;
+        }
+        while (a < b && /\s/.test(txt[a])) a++;      // taglia spazi ai bordi
+        while (b > a && /\s/.test(txt[b - 1])) b--;
+        if (b - a < 1) return null;
+        return { sNode: tn, sOff: a, eNode: tn, eOff: b, text: txt.slice(a, b) };
       } catch (err) { return null; }
     }
 
