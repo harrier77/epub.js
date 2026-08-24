@@ -37,7 +37,7 @@
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 8px 12px;
+      padding: 1px 1px;
       background: #3a3a3a;
       border-bottom: 1px solid #555;
       flex-shrink: 0;
@@ -71,14 +71,14 @@
       color: #fff;
       border: none;
       border-radius: 4px;
-      padding: 6px 12px;
+      padding: 1px 1px;
       cursor: pointer;
-      /*font-size: 14px;*/
+      font-size: 16px;
     }
     #toolbar button:hover { background: #666; }
     #toolbar button:disabled { opacity: .4; cursor: default; }
     #libraryToggle.active { background: #777; }
-    #title { flex: 1; text-align: center; font-weight: 600; overflow: hidden;
+    #title { flex: 1; margin-left:2rem;text-align: left; font-weight: 600; overflow: hidden;
              white-space: nowrap; text-overflow: ellipsis; }
     #chapter { font-size: 12px; color: #aaa; }
     #filesToggle.active { background: #777; }
@@ -755,13 +755,16 @@
     <button id="filesToggle" title="File inclusi nell'EPUB">📂</button>
     <button id="prev" title="Pagina precedente" disabled style="width:4rem;font-size:1.2rem">‹</button>
     <button id="next" title="Pagina successiva" disabled style="width:4rem;font-size:1.2rem">›</button>
+      <button id="tabView" class="tab active">📖</button>
+    <button id="tabEdit" class="tab" disabled>✏️</button>
+    <button id="tabEditSel" class="tab actionBtn" title="Mostra l'editor in-context per il paragrafo appena cliccato nel lettore (clicca prima sul paragrafo)"  style="padding:0;font-size:22px">🔠</button>
      <button id="zoomOut" title="Riduci zoom (contenuto di lettura)" disabled>A−</button>
     <button id="zoomReset" title="Reimposta zoom al 100%" disabled>100%</button>
     <button id="zoomIn" title="Aumenta zoom (contenuto di lettura)" disabled>A+</button> 
     <button id="spreadToggle" disabled title="Toggle single/double page view">📄</button>
     <button id="reloadBtn" disabled title="Reload current chapter from disk">🔄</button>
     <button id="metaEditBtn" disabled title="Edit EPUB metadata (folder books only)">⚙️</button>
-    <button id="searchToggle" disabled title="Search in current chapter" style="font-size:16px">🔎</button>
+    <button id="searchToggle" disabled title="Search in current chapter" style="font-size:20px">🔎</button>
 
     <select id="widthSelect" title="Larghezza massima pagina">
     <option value="30">30%</option>
@@ -777,19 +780,17 @@
     </select>
     <button id="bgYellowBtn" title="Sfondo giallo pallido per il testo" disabled style="padding:4px 8px;font-size:12px">G</button>
     <button id="bgBlackBtn" title="Sfondo nero con testo bianco" disabled style="padding:4px 8px;font-size:12px">N</button>
-    <span id="title">Lettore EPUB</span>
-    <span id="chapter"></span>
-  </div>
+    
+<!--  </div> -->
 
   <!-- Tab: lettura / modifica HTML -->
-  <div id="tabs">
-    <button id="tabView" class="tab active">📖</button>
-    <button id="tabEdit" class="tab" disabled>✏️</button>
-    <button id="tabEditSel" class="tab actionBtn"
-      title="Mostra l'editor in-context per il paragrafo appena cliccato nel lettore (clicca prima sul paragrafo)">🔠</button>
-  </div>
+  <!-- <div id="tabs">-->
 
-  <div id="viewer"></div>
+        <span id="title">Lettore EPUB</span>
+        <span id="chapter"></span>
+ </div>
+
+<div id="viewer"></div>
 
   <!-- Pannello editor HTML del capitolo corrente -->
   <div id="editorPanel">
