@@ -73,7 +73,7 @@
       border-radius: 4px;
       padding: 6px 12px;
       cursor: pointer;
-      font-size: 14px;
+      /*font-size: 14px;*/
     }
     #toolbar button:hover { background: #666; }
     #toolbar button:disabled { opacity: .4; cursor: default; }
@@ -761,7 +761,7 @@
     <button id="spreadToggle" disabled title="Toggle single/double page view">📄</button>
     <button id="reloadBtn" disabled title="Reload current chapter from disk">🔄</button>
     <button id="metaEditBtn" disabled title="Edit EPUB metadata (folder books only)">⚙️</button>
-    <button id="searchToggle" disabled title="Search in current chapter">🔍</button>
+    <button id="searchToggle" disabled title="Search in current chapter" style="font-size:16px">🔎</button>
 
     <select id="widthSelect" title="Larghezza massima pagina">
     <option value="30">30%</option>
@@ -783,10 +783,10 @@
 
   <!-- Tab: lettura / modifica HTML -->
   <div id="tabs">
-    <button id="tabView" class="tab active">📖 Lettura</button>
-    <button id="tabEdit" class="tab" disabled>✏️ Modifica HTML</button>
+    <button id="tabView" class="tab active">📖</button>
+    <button id="tabEdit" class="tab" disabled>✏️</button>
     <button id="tabEditSel" class="tab actionBtn"
-      title="Mostra l'editor in-context per il paragrafo appena cliccato nel lettore (clicca prima sul paragrafo)">✏️ Paragrafo selezionato</button>
+      title="Mostra l'editor in-context per il paragrafo appena cliccato nel lettore (clicca prima sul paragrafo)">🔠</button>
   </div>
 
   <div id="viewer"></div>
