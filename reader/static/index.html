@@ -913,9 +913,18 @@
     // to #viewer (not documentElement), so the browser chrome is never zoomed
     // and the viewport dimensions stay stable.  See applyZoom() below.
 
+    var statusTimer = null;
     function setStatus(msg) {
+      if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
       statusEl.textContent = msg;
       statusEl.style.display = msg ? "block" : "none";
+      // Auto-hide dopo 3 secondi (solo per i messaggi non di errore persistenti)
+      if (msg) {
+        statusTimer = setTimeout(function () {
+          statusEl.style.display = "none";
+          statusTimer = null;
+        }, 3000);
+      }
     }
 
     // --- Libreria: sidebar sinistra ---
