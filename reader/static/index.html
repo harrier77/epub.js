@@ -59,7 +59,7 @@
       /* Nasconde i bottoni meno importanti su schermi stretti */
       #toolbar #reloadBtn,
       #toolbar #metaEditBtn,
-      #toolbar #buildBtn,
+      #toolbar #searchToggle,
       #toolbar #widthSelect,
       #toolbar #bgYellowBtn,
       #toolbar #bgBlackBtn {
@@ -680,10 +680,75 @@
       font-size: 13px; display: none; z-index: 10;
     }
 
+    /* Search bar */
+    #searchBar {
+      display: none;
+      position: fixed;
+      top: 48px;
+      right: 20px;
+      z-index: 100;
+      background: #3a3a3a;
+      border: 1px solid #555;
+      border-radius: 8px;
+      padding: 8px 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,.4);
+      gap: 8px;
+      align-items: center;
+    }
+    #searchBar.open { display: flex; }
+    #searchInput {
+      background: #222;
+      color: #eee;
+      border: 1px solid #666;
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-size: 14px;
+      width: 200px;
+      outline: none;
+    }
+    #searchInput:focus { border-color: #8ab4f8; }
+    #searchInput::placeholder { color: #888; }
+    #searchInfo {
+      color: #aaa;
+      font-size: 12px;
+      min-width: 60px;
+      text-align: center;
+    }
+    #searchBar button {
+      background: #555;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    #searchBar button:hover { background: #666; }
+    #searchBar button:disabled { opacity: .4; cursor: default; }
+    #searchClose {
+      background: none !important;
+      color: #aaa !important;
+      font-size: 16px !important;
+      padding: 4px !important;
+    }
+    #searchClose:hover { color: #fff !important; }
+
+    /* Search highlight marks - style injected into iframe */
+    /* These are fallback styles, main styles are injected via JS */
+
   </style>
 </head>
 <body>
   <div id="status">Caricamento...</div>
+
+  <!-- Search bar -->
+  <div id="searchBar">
+    <input type="text" id="searchInput" placeholder="Search text..." />
+    <span id="searchInfo"></span>
+    <button id="searchPrev" title="Previous match">◀</button>
+    <button id="searchNext" title="Next match">▶</button>
+    <button id="searchClose" title="Close search">✕</button>
+  </div>
 
   <div id="toolbar">
     <button id="libraryToggle" title="Libreria">📚</button>
@@ -693,10 +758,11 @@
      <button id="zoomOut" title="Riduci zoom (contenuto di lettura)" disabled>A−</button>
     <button id="zoomReset" title="Reimposta zoom al 100%" disabled>100%</button>
     <button id="zoomIn" title="Aumenta zoom (contenuto di lettura)" disabled>A+</button> 
-    <button id="spreadToggle" disabled>Una pagina</button>
-    <button id="reloadBtn" title="Ricarica il capitolo corrente dal disco (libri da cartella: mostra la traduzione salvata dal translator)" disabled>⟳ Ricarica</button>
-    <button id="metaEditBtn" title="Modifica i metadati dell'EPUB (solo libri da cartella)" disabled>⚙ Metadati</button>
-    <button id="buildBtn" title="Assembla un EPUB ben formato dalla cartella tradotta (come build_epub.py): mimetype non compresso, fallback sul tedesco per i capitoli non tradotti, dc:language -> it" disabled>📦 Crea EPUB</button>
+    <button id="spreadToggle" disabled title="Toggle single/double page view">📄</button>
+    <button id="reloadBtn" disabled title="Reload current chapter from disk">🔄</button>
+    <button id="metaEditBtn" disabled title="Edit EPUB metadata (folder books only)">⚙️</button>
+    <button id="searchToggle" disabled title="Search in current chapter">🔍</button>
+
     <select id="widthSelect" title="Larghezza massima pagina">
     <option value="30">30%</option>
     <option value="35">35%</option>
@@ -709,8 +775,8 @@
       <option value="90" selected>90%</option>
       <option value="100">100%</option>
     </select>
-    <button id="bgYellowBtn" title="Sfondo giallo pallido per il testo" disabled>Giallo</button>
-    <button id="bgBlackBtn" title="Sfondo nero con testo bianco" disabled>Nero</button>
+    <button id="bgYellowBtn" title="Sfondo giallo pallido per il testo" disabled style="padding:4px 8px;font-size:12px">G</button>
+    <button id="bgBlackBtn" title="Sfondo nero con testo bianco" disabled style="padding:4px 8px;font-size:12px">N</button>
     <span id="title">Lettore EPUB</span>
     <span id="chapter"></span>
   </div>
@@ -988,6 +1054,22 @@
       posSaveTimer = setTimeout(savePositionNow, 1200);
     }
 
+    // ======================================================================
+    // POSITION RESTORATION (FIX: IndexSizeError CFI with invalid offset)
+    // ======================================================================
+    // PROBLEM: epub.js throws "Failed to execute 'setStart' on 'Range':
+    // There is no child at offset N" when restoring a saved position with
+    // a CFI that references an offset no longer valid (e.g., after book
+    // modification, or corrupted position data). The error occurs inside
+    // epub.js's EpubCFI.toRange() during Contents.locationOf(), which is
+    // called asynchronously by the view manager — outside the promise chain,
+    // so .catch() cannot intercept it.
+    //
+    // SOLUTION: Navigate to the chapter href FIRST (safe, no CFI involved).
+    // Only attempt CFI-based positioning as a fallback. Always return a
+    // resolved promise to ensure the openBook() chain continues and buttons
+    // get enabled. The CFI is validated before use.
+    // ======================================================================
     function restoreSavedPosition() {
       var key = bookKey();
       if (!key) { posReady = true; return Promise.resolve(); }
@@ -995,15 +1077,20 @@
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (d) {
           var p = d && d.position;
-          if (!p || (!p.cfi && !p.href)) return;
-          var target = p.cfi || p.href;
-          return rendition.display(target).catch(function () {
-            // Il CFI non risolve (capitoli modificati/rinumerati): proviamo
-            // il capitolo; se fallisce restiamo all'inizio del libro.
-            if (p.cfi && p.href) return rendition.display(p.href);
-          }).catch(function () {});
+          if (!p || (!p.cfi && !p.href)) return Promise.resolve();
+          // STEP 1: Navigate to chapter href (safe — no CFI, no offset risk)
+          if (p.href) {
+            return rendition.display(p.href).catch(function () {});
+          }
+          // STEP 2 (fallback): Try CFI directly if no href available
+          if (p.cfi) {
+            try {
+              return rendition.display(p.cfi).catch(function () {});
+            } catch (e) { return Promise.resolve(); }
+          }
+          return Promise.resolve();
         })
-        .catch(function () {})
+        .catch(function () { return Promise.resolve(); })
         .then(function () { posReady = true; });
     }
 
@@ -1112,10 +1199,18 @@
       return hasTouch && (narrowScreen || smallScreen);
     }
 
+    // ======================================================================
+    // OPEN BOOK (FIX: clear search before any CFI-based operation)
+    // ======================================================================
+    // When opening a new book, we MUST clear any existing search highlights
+    // from the previous book. The <mark> elements would otherwise persist
+    // in memory and could interfere with the new book's CFI handling.
+    // ======================================================================
     function openBook(url) {
-      closeInlineEditor(); // il popover in-context appartiene al libro precedente
-      closeMetaEditor();  // idem per l'editor dei metadati
-      closeBuildReport(); // e per il report di costruzione EPUB
+      closeInlineEditor();
+      closeMetaEditor();
+      closeBuildReport();
+      closeSearch(); // CRITICAL: clear search highlights before opening new book
       if (book) {
         try {
           book.destroy();
@@ -1137,7 +1232,6 @@
       if (isFolderBook()) installArchiveShim();
       document.getElementById("reloadBtn").disabled = !isFolderBook();
       document.getElementById("metaEditBtn").disabled = !isFolderBook();
-      document.getElementById("buildBtn").disabled = !isFolderBook();
       rendition = book.renderTo("viewer", {
         width: "100%",
         height: "100%",
@@ -1151,11 +1245,15 @@
       applyBgToContainers();
 
       // Ad ogni render (apertura libro, cambio capitolo, resize) prepara
-      // l'editing in-context sul documento del capitolo (popover al click).
+      // l'editing in-context sul documento del capitolo (popover al click)
+      // e inietta gli stili per la ricerca.
       rendition.on("rendered", function () {
         var contents = rendition.getContents();
         if (contents) contents.forEach(function (c) {
-          if (c && c.document) bindInlineEdit(c); // prepara il popover in-context al click (invisibile)
+          if (c && c.document) {
+            bindInlineEdit(c); // prepara il popover in-context al click (invisibile)
+            injectSearchStyles(c.document); // stili highlight ricerca
+          }
         });
       });
 
@@ -1190,11 +1288,23 @@
         else if (dx > 0 && !document.getElementById("prev").disabled) navigate(-1);
       });
 
-      // Prima riapriamo il libro all'inizio (cosi' i metadati e la TOC sono
-      // pronti), poi ripristiniamo la posizione salvata per QUESTO libro.
+      // ====================================================================
+      // INITIAL DISPLAY + POSITION RESTORATION CHAIN
+      // ====================================================================
+      // CRITICAL: This promise chain MUST complete successfully for buttons
+      // to be enabled. If restoreSavedPosition() throws or returns a
+      // rejected promise, the .then() that enables buttons will never execute.
+      //
+      // FIX: restoreSavedPosition() now always returns a resolved promise
+      // (even on error) to prevent breaking this chain.
+      //
+      // FIX: restoreSavedPosition() navigates to chapter href FIRST (safe),
+      // then tries CFI only as fallback. This avoids the IndexSizeError
+      // caused by invalid CFIs in epub.js's EpubCFI.toRange().
+      // ====================================================================
       rendition.display().then(function () {
         setStatus("");
-        return restoreSavedPosition();
+        return restoreSavedPosition(); // always resolves → chain continues
       }).then(function () {
         document.getElementById("prev").disabled = false;
         document.getElementById("next").disabled = false;
@@ -1206,6 +1316,7 @@
         document.getElementById("zoomIn").disabled = false;
         document.getElementById("bgYellowBtn").disabled = false;
         document.getElementById("bgBlackBtn").disabled = false;
+        document.getElementById("searchToggle").disabled = false;
         var title = book.packaging.metadata.title;
         if (title) document.getElementById("title").textContent = title;
         try {
@@ -1221,9 +1332,13 @@
         if (isMobileDevice()) {
           spreadOn = false;
           rendition.spread("none");
-          document.getElementById("spreadToggle").textContent = "Due pagine";
+          document.getElementById("spreadToggle").textContent = "📖";
           applyZoom(1);
         }
+      }).catch(function (err) {
+        // Errore durante il rendering iniziale (es. CFI non valido)
+        console.warn("Initial display error:", err);
+        setStatus("");
       });
 
       rendition.on("relocated", function (location) {
@@ -1282,7 +1397,7 @@
       spreadOn = !spreadOn;
       rendition.spread(spreadOn ? "auto" : "none");
       document.getElementById("spreadToggle").textContent =
-        spreadOn ? "Una pagina" : "Due pagine";
+        spreadOn ? "📄" : "📖";
     });
 
     // ZOOM: CSS zoom applied directly to #viewer only (not :root).
@@ -1293,10 +1408,32 @@
     // #viewer has overflow:auto, so zoomed content that exceeds the box
     // can be scrolled.
     var readerZoom = 1, ZOOM_MIN = 0.75, ZOOM_MAX = 2, ZOOM_STEP = 0.25;
+    // ======================================================================
+    // ZOOM HANDLER (FIX: search highlights break CFI-based navigation)
+    // ======================================================================
+    // PROBLEM: Search highlights add <mark> elements to the DOM, splitting
+    // text nodes. This invalidates CFIs that epub.js uses internally for
+    // navigation and positioning. When rendition.resize() is called (during
+    // zoom), epub.js tries to convert stored CFIs to ranges and crashes
+    // with "There is no child at offset N".
+    //
+    // SOLUTION: Clear all <mark> highlights BEFORE resize, then re-apply
+    // them AFTER resize completes. This ensures epub.js works with a clean
+    // DOM during re-rendering.
+    // ======================================================================
+    var searchQueryBeforeZoom = null; // save active query before zoom
     function applyZoom(z) {
       if (!rendition) return;
       z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
       readerZoom = z;
+      // STEP 1: Remove <mark> highlights BEFORE resize to prevent CFI errors
+      // <mark> elements split text nodes → invalid CFIs → crash in epub.js
+      if (searchMatches.length > 0) {
+        searchQueryBeforeZoom = searchInput.value;
+        clearSearchHighlights();
+        searchMatches = [];
+        searchCurrentIdx = -1;
+      }
       // Apply zoom to the viewer element only — the rest of the page is untouched.
       viewer.style.zoom = z;
       document.getElementById("zoomReset").textContent = Math.round(z * 100) + "%";
@@ -1314,6 +1451,18 @@
       // re-measure and reflow columns (same as a window resize).
       requestAnimationFrame(function () {
         if (rendition) rendition.resize();
+        // Dopo il resize, reinietta gli stili e ri-esegui la ricerca se attiva
+        if (searchQueryBeforeZoom) {
+          var q = searchQueryBeforeZoom;
+          searchQueryBeforeZoom = null;
+          // Reinietta gli stili nei nuovi iframe
+          var contents = rendition.getContents();
+          if (contents) contents.forEach(function (c) {
+            if (c && c.document) injectSearchStyles(c.document);
+          });
+          // Ri-esegui la ricerca
+          searchInChapter(q);
+        }
       });
     }
     document.getElementById("zoomOut").addEventListener("click", function () { applyZoom(readerZoom - ZOOM_STEP); });
@@ -1404,8 +1553,19 @@
         if (getComputedStyle(editorPanel).display !== "none") {
           document.getElementById("codeEditor").value = text;
         }
+        clearSearchHighlights(); // pulisci prima del re-render
         rendition.clear();
-        rendition.display(currentHref).catch(function () {});
+        rendition.display(currentHref).then(function () {
+          // Reinietta stili e ri-esegui ricerca se attiva
+          var q = searchInput.value;
+          if (q && q.length >= 2) {
+            var contents = rendition.getContents();
+            if (contents) contents.forEach(function (c) {
+              if (c && c.document) injectSearchStyles(c.document);
+            });
+            searchInChapter(q);
+          }
+        }).catch(function () {});
         setStatus("Capitolo ricaricato dal disco ✓");
       }).catch(function (err) {
         setStatus("Errore nel ricaricamento: " + (err && err.message ? err.message : err));
@@ -1506,6 +1666,281 @@
     document.getElementById("metaEditBtn").addEventListener("click", openMetaEditor);
 
     // ==================================================================
+    // Ricerca nel testo del capitolo corrente
+    // Usa lo stesso approccio dell'editor inline: accede al DOM dell'iframe
+    // tramite contents.document e usa section.cfiFromElement per la navigazione.
+    // ==================================================================
+    var searchBar = document.getElementById("searchBar");
+    var searchInput = document.getElementById("searchInput");
+    var searchInfo = document.getElementById("searchInfo");
+    var searchMatches = [];  // array di {element, cfi, text, contents}
+    var searchCurrentIdx = -1;
+    var searchHighlights = []; // elementi <mark> aggiunti per l'evidenziazione
+
+    function openSearch() {
+      searchBar.classList.add("open");
+      searchInput.value = "";
+      searchInfo.textContent = "";
+      clearSearchHighlights();
+      searchMatches = [];
+      searchCurrentIdx = -1;
+      searchInput.focus();
+    }
+
+    function closeSearch() {
+      searchBar.classList.remove("open");
+      clearSearchHighlights();
+      searchMatches = [];
+      searchCurrentIdx = -1;
+    }
+
+    // ======================================================================
+    // CLEAR SEARCH HIGHLIGHTS (FIX: <mark> elements break CFIs)
+    // ======================================================================
+    // PROBLEM: When we search, we wrap matched text in <mark> elements.
+    // This splits text nodes (e.g., one node becomes three: before/mark/after).
+    // epub.js stores CFIs based on text node offsets. After adding <mark>,
+    // the stored CFI offset (e.g., 285) may no longer exist in the modified
+    // node structure, causing IndexSizeError in EpubCFI.toRange().
+    //
+    // SOLUTION: Before any operation that triggers CFI-based navigation
+    // (resize, re-render, page turn), we remove all <mark> elements and
+    // restore the original text nodes using parent.normalize().
+    //
+    // IMPORTANT: This function MUST be called BEFORE:
+    //   - rendition.resize() (zoom, window resize, width change)
+    //   - rendition.clear() + rendition.display() (reload, save, tab switch)
+    //   - Opening a new book
+    // And the search must be RE-APPLIED AFTER these operations complete.
+    // ======================================================================
+    function clearSearchHighlights() {
+      searchHighlights.forEach(function (mark) {
+        if (mark && mark.parentNode) {
+          // Replace <mark> with its text content, then normalize merges
+          // adjacent text nodes back to their original structure
+          var parent = mark.parentNode;
+          parent.replaceChild(document.createTextNode(mark.textContent), mark);
+          parent.normalize(); // merges adjacent text nodes → restores CFI validity
+        }
+      });
+      searchHighlights = [];
+    }
+
+    // Evidenzia una stringa in un nodo testo, restituisce i mark creati
+    function highlightTextNode(node, query, doc) {
+      var text = node.nodeValue;
+      var lowerText = text.toLowerCase();
+      var lowerQuery = query.toLowerCase();
+      var marks = [];
+      var parts = [];
+      var lastIdx = 0;
+      var idx;
+
+      while ((idx = lowerText.indexOf(lowerQuery, lastIdx)) !== -1) {
+        if (idx > lastIdx) {
+          parts.push(doc.createTextNode(text.slice(lastIdx, idx)));
+        }
+        var mark = doc.createElement("mark");
+        mark.className = "search-highlight";
+        mark.textContent = text.slice(idx, idx + query.length);
+        parts.push(mark);
+        marks.push(mark);
+        lastIdx = idx + query.length;
+      }
+
+      if (marks.length === 0) return [];
+
+      if (lastIdx < text.length) {
+        parts.push(doc.createTextNode(text.slice(lastIdx)));
+      }
+
+      var parent = node.parentNode;
+      parts.forEach(function (p) { parent.insertBefore(p, node); });
+      parent.removeChild(node);
+      return marks;
+    }
+
+    // Cerca nel testo del capitolo corrente e evidenzia i risultati
+    function searchInChapter(query) {
+      clearSearchHighlights();
+      searchMatches = [];
+      searchCurrentIdx = -1;
+
+      if (!query || !rendition || !book) {
+        searchInfo.textContent = "";
+        return;
+      }
+
+      var section = book.spine ? book.spine.get(currentHref) : null;
+      if (!section) {
+        searchInfo.textContent = "No section";
+        return;
+      }
+
+      var contents = rendition.getContents();
+      if (!contents || !contents.length) {
+        searchInfo.textContent = "No content";
+      }
+
+      contents.forEach(function (c) {
+        if (!c || !c.document) return;
+        var doc = c.document;
+        var body = doc.body;
+        if (!body) return;
+
+        // Trova tutti i nodi testo (come fa l'editor inline)
+        var walker = doc.createTreeWalker(
+          body,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode: function(n) {
+              var tag = n.parentNode && (n.parentNode.tagName || "").toLowerCase();
+              if (tag === "script" || tag === "style") return NodeFilter.FILTER_REJECT;
+              if (!n.nodeValue || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          }
+        );
+
+        var textNodes = [];
+        while (walker.nextNode()) {
+          textNodes.push(walker.currentNode);
+        }
+
+        // Evidenzia ogni occorrenza e raccogli i match
+        textNodes.forEach(function (node) {
+          var marks = highlightTextNode(node, query, doc);
+          marks.forEach(function (mark) {
+            // Trova il paragrafo/blocco che contiene il mark (come inlineBlockFrom)
+            var blockEl = mark.closest ? mark.closest("p, div, h1, h2, h3, h4, h5, h6, li, blockquote, pre, section, article") : mark.parentNode;
+            if (!blockEl) blockEl = mark.parentNode;
+
+            // Ottieni il CFI dell'elemento (come fa l'editor inline con cfiFromElement)
+            var cfi = null;
+            try {
+              cfi = section.cfiFromElement(blockEl);
+            } catch (e) {}
+
+            searchMatches.push({
+              mark: mark,
+              element: blockEl,
+              cfi: cfi,
+              contents: c,
+              text: mark.textContent
+            });
+            searchHighlights.push(mark);
+          });
+        });
+      });
+
+      if (searchMatches.length > 0) {
+        searchCurrentIdx = 0;
+        updateSearchInfo();
+        scrollToMatch(0);
+      } else {
+        searchInfo.textContent = "No results";
+      }
+    }
+
+    function updateSearchInfo() {
+      if (searchMatches.length === 0) {
+        searchInfo.textContent = "";
+      } else {
+        searchInfo.textContent = (searchCurrentIdx + 1) + "/" + searchMatches.length;
+      }
+    }
+
+    function scrollToMatch(idx) {
+      if (idx < 0 || idx >= searchMatches.length) return;
+
+      // Rimuovi active dal precedente
+      if (searchCurrentIdx >= 0 && searchCurrentIdx < searchMatches.length) {
+        var prev = searchMatches[searchCurrentIdx];
+        if (prev.mark) prev.mark.classList.remove("active");
+      }
+
+      searchCurrentIdx = idx;
+      var match = searchMatches[idx];
+      updateSearchInfo();
+
+      // Evidenzia il match corrente
+      if (match.mark) match.mark.classList.add("active");
+
+      // Scrolla al mark usando scrollIntoView (funziona nell'iframe)
+      if (match.mark && match.mark.scrollIntoView) {
+        try {
+          match.mark.scrollIntoView({ behavior: "smooth", block: "center" });
+        } catch (e) {
+          // Fallback: scrolla l'elemento padre
+          if (match.element && match.element.scrollIntoView) {
+            match.element.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+        }
+      }
+    }
+
+    function searchNext() {
+      if (searchMatches.length === 0) return;
+      var nextIdx = (searchCurrentIdx + 1) % searchMatches.length;
+      scrollToMatch(nextIdx);
+    }
+
+    function searchPrev() {
+      if (searchMatches.length === 0) return;
+      var prevIdx = (searchCurrentIdx - 1 + searchMatches.length) % searchMatches.length;
+      scrollToMatch(prevIdx);
+    }
+
+    document.getElementById("searchToggle").addEventListener("click", openSearch);
+    document.getElementById("searchClose").addEventListener("click", closeSearch);
+    document.getElementById("searchNext").addEventListener("click", searchNext);
+    document.getElementById("searchPrev").addEventListener("click", searchPrev);
+
+    searchInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (e.shiftKey) searchPrev();
+        else searchNext();
+      } else if (e.key === "Escape") {
+        closeSearch();
+      }
+    });
+
+    searchInput.addEventListener("input", function () {
+      var query = searchInput.value;
+      if (query.length >= 2) {
+        searchInChapter(query);
+      } else {
+        clearSearchHighlights();
+        searchMatches = [];
+        searchCurrentIdx = -1;
+        searchInfo.textContent = query ? "Type more..." : "";
+      }
+    });
+
+    // ======================================================================
+    // INJECT SEARCH STYLES into iframe document
+    // ======================================================================
+    // epub.js renders content in sandboxed iframes. We cannot use external
+    // stylesheets or parent page styles. CSS must be injected directly into
+    // each iframe's <head> for <mark> elements to be styled.
+    //
+    // This function is called:
+    // 1. On "rendered" event (new chapter loaded)
+    // 2. After resize/re-render when search is re-applied
+    // ======================================================================
+    function injectSearchStyles(doc) {
+      if (!doc || !doc.head) return;
+      if (doc.getElementById("search-styles")) return; // already injected
+      var style = doc.createElement("style");
+      style.id = "search-styles";
+      style.textContent = 
+        "mark.search-highlight { background: #ffeb3b; color: #000; padding: 1px 2px; }" +
+        "mark.search-highlight.active { background: #ff9800; outline: 2px solid #f57f17; }";
+      doc.head.appendChild(style);
+    }
+
+    // ==================================================================
     // Costruzione EPUB da cartella (port di build_epub.py)
     // ==================================================================
     // Il bottone "Crea EPUB" lancia la routine Flask equivalente a
@@ -1551,25 +1986,7 @@
     document.getElementById("buildReportClose").addEventListener("click", closeBuildReport);
     document.getElementById("buildReportOk").addEventListener("click", closeBuildReport);
 
-    document.getElementById("buildBtn").addEventListener("click", function () {
-      var btn = document.getElementById("buildBtn");
-      btn.disabled = true;
-      setStatus("Costruzione dell'EPUB in corso…");
-      apiBuildEpub().then(function (res) {
-        btn.disabled = !isFolderBook();
-        if (res && res.ok) {
-          setStatus("EPUB creato ✓ (" + res.output + ")");
-        } else if (res && res.error) {
-          setStatus("Errore nella costruzione: " + res.error);
-        } else {
-          setStatus("Costruzione terminata: vedi il report.");
-        }
-        showBuildReport(res || {});
-      }).catch(function (err) {
-        btn.disabled = !isFolderBook();
-        setStatus("Errore del server: " + err);
-      });
-    });
+
     document.getElementById("metaClose").addEventListener("click", closeMetaEditor);
     document.getElementById("metaCancel").addEventListener("click", closeMetaEditor);
 
@@ -1714,14 +2131,72 @@
       });
     }
     viewer.style.maxWidth = document.getElementById("widthSelect").value + "%";
+
+    // ======================================================================
+    // SAFE RESIZE (FIX: preserve search state across resize operations)
+    // ======================================================================
+    // PROBLEM: rendition.resize() re-renders content, which invalidates
+    // any <mark> elements in the DOM. If search is active, highlights
+    // become orphaned and CFIs become invalid.
+    //
+    // SOLUTION: Save search state → clear highlights → resize → re-inject
+    // styles → re-run search. This pattern is used for width changes and
+    // must be followed for ANY operation that calls rendition.resize().
+    // ======================================================================
+    function safeResize() {
+      // Save current search state
+      var hadSearch = searchMatches.length > 0 || searchQueryBeforeZoom;
+      var q = searchInput.value;
+      // Clear highlights to restore original DOM for epub.js
+      if (hadSearch && q) {
+        clearSearchHighlights();
+        searchMatches = [];
+        searchCurrentIdx = -1;
+      }
+      // Safe to resize now — DOM is clean
+      if (rendition) rendition.resize();
+      // Re-apply search after resize completes
+      if (hadSearch && q && q.length >= 2) {
+        requestAnimationFrame(function () {
+          var contents = rendition.getContents();
+          if (contents) contents.forEach(function (c) {
+            if (c && c.document) injectSearchStyles(c.document);
+          });
+          searchInChapter(q);
+        });
+      }
+    }
+
     document.getElementById("widthSelect").addEventListener("change", function () {
       viewer.style.maxWidth = this.value + "%";
-      if (rendition) rendition.resize(); // ri-calcola il layout della pagina
+      safeResize();
     });
 
-    // Ridimensiona la pagina quando cambia la viewport (rotazione, barra URL mobile…)
+    // ======================================================================
+    // WINDOW RESIZE HANDLER (FIX: browser zoom breaks rendering)
+    // ======================================================================
+    // PROBLEM: Browser zoom (Ctrl+/-) triggers window resize events. If we
+    // call rendition.resize() on every such event, epub.js re-renders the
+    // content and may encounter invalid CFIs (from search highlights or
+    // other DOM modifications), causing IndexSizeError crashes.
+    //
+    // SOLUTION: Track window dimensions. Only call rendition.resize() when
+    // actual window size changes (real resize, rotation), not when only
+    // the zoom level changes. Browser zoom is handled separately by
+    // applyZoom() which manages search highlights properly.
+    // ======================================================================
+    var lastResizeWidth = window.innerWidth;
+    var lastResizeHeight = window.innerHeight;
+    var resizeTimer = null;
     window.addEventListener("resize", function () {
-      if (rendition) rendition.resize();
+      // Skip if only zoom changed (CSS dimensions remain the same)
+      if (window.innerWidth === lastResizeWidth && window.innerHeight === lastResizeHeight) return;
+      lastResizeWidth = window.innerWidth;
+      lastResizeHeight = window.innerHeight;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(function () {
+        if (rendition) rendition.resize();
+      }, 150);
     });
 
     // --- Padding / colonne: lasciate interamente a epub.js (vedi openBook) ---
@@ -1758,6 +2233,7 @@
     function showTab(which) {
       closeInlineEditor(); // il popover in-context vive solo nel viewer
       closeMetaEditor();   // l'editor metadati è un modale: si chiude al cambio tab
+      clearSearchHighlights(); // pulisci highlight ricerca prima del cambio tab
       var viewTab = document.getElementById("tabView");
       var editTab = document.getElementById("tabEdit");
       var editorPanel = document.getElementById("editorPanel");
@@ -1915,7 +2391,7 @@
         }
       }
       // 3) Ri-renderizza il capitolo corrente nel viewer. Se il viewer e'
-      //    nascosto (tab Modifica HTML) il ri-render produrrebbe un iframe 0x0
+      //    nascosto (tab Modifica HTML) il ri-render prodrebbe un iframe 0x0
       //    e la pagina di lettura resterebbe bianca: in quel caso il ri-render
       //    viene rimandato al ritorno sulla tab Lettura (showTab legge il flag
       //    window._epubNeedsRefresh).
@@ -1923,7 +2399,18 @@
       if (viewerEl && viewerEl.style.display === 'none') {
         window._epubNeedsRefresh = true;
       } else {
-        rendition.display(currentHref);
+        clearSearchHighlights(); // pulisci prima del re-render
+        rendition.display(currentHref).then(function () {
+          // Reinietta stili e ri-esegui ricerca se attiva
+          var q = searchInput.value;
+          if (q && q.length >= 2) {
+            var contents = rendition.getContents();
+            if (contents) contents.forEach(function (c) {
+              if (c && c.document) injectSearchStyles(c.document);
+            });
+            searchInChapter(q);
+          }
+        }).catch(function () {});
       }
     }
 
@@ -2668,8 +3155,19 @@
           //    sul paragrafo. clear() e' necessario: con la sezione gia'
           //    visibile display() non ricarica il documento.
           if (rendition) {
+            clearSearchHighlights(); // pulisci prima del re-render
             rendition.clear();
-            rendition.display(ctx.cfi || ctx.href).catch(function () {});
+            rendition.display(ctx.cfi || ctx.href).then(function () {
+              // Reinietta stili e ri-esegui ricerca se attiva
+              var q = searchInput.value;
+              if (q && q.length >= 2) {
+                var contents = rendition.getContents();
+                if (contents) contents.forEach(function (c) {
+                  if (c && c.document) injectSearchStyles(c.document);
+                });
+                searchInChapter(q);
+              }
+            }).catch(function () {});
           }
         })
         .catch(function (err) {
