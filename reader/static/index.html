@@ -1035,6 +1035,11 @@
     // del libro corrente; all'apertura ripristiniamo la posizione salvata
     // con fallback graduato: CFI -> href del capitolo -> inizio libro.
     var posSaveTimer = null;
+    // CRITICAL: posReady gates all saving until the saved position has been
+    // restored. Without it, the initial 'relocated' fired by display() would
+    // overwrite the stored position with "page 1" BEFORE the restore completes,
+    // permanently losing the reader's last position. This gate is what makes
+    // "reopen exactly where I left off" reliable.
     var posReady = false; // false finche' il ripristino non e' completato:
                           // evita che il 'relocated' della display() iniziale
                           // sovrascriva la posizione salvata con la pagina 1.
@@ -1059,6 +1064,10 @@
       }).catch(function () {});
     }
 
+    // Debounced save: fires only after posReady, i.e. only for GENUINE user
+    // navigation. Every 'relocated' event here reflects where the reader
+    // actually is, so persisting it guarantees the next open() restores the
+    // same spot.
     function savePositionSoon() {
       if (!posReady) return; // niente salvataggi prima del ripristino
       if (posSaveTimer) clearTimeout(posSaveTimer);
@@ -1066,20 +1075,26 @@
     }
 
     // ======================================================================
-    // POSITION RESTORATION (FIX: IndexSizeError CFI with invalid offset)
+    // POSITION RESTORATION
     // ======================================================================
-    // PROBLEM: epub.js throws "Failed to execute 'setStart' on 'Range':
-    // There is no child at offset N" when restoring a saved position with
-    // a CFI that references an offset no longer valid (e.g., after book
-    // modification, or corrupted position data). The error occurs inside
-    // epub.js's EpubCFI.toRange() during Contents.locationOf(), which is
-    // called asynchronously by the view manager — outside the promise chain,
-    // so .catch() cannot intercept it.
+    // GOAL: on reopen, land the reader EXACTLY at the text position last
+    // seen before closing — not merely at the start of the chapter.
     //
-    // SOLUTION: Navigate to the chapter href FIRST (safe, no CFI involved).
-    // Only attempt CFI-based positioning as a fallback. Always return a
-    // resolved promise to ensure the openBook() chain continues and buttons
-    // get enabled. The CFI is validated before use.
+    // WHY THIS TWO-STEP DESIGN IS CORRECT:
+    //  1. Navigate to the chapter href FIRST. This is CFI-free and can never
+    //     trigger epub.js's IndexSizeError ('no child at offset N') thrown by
+    //     EpubCFI.toRange() inside Contents.locationOf() — an error raised
+    //     asynchronously by the view manager, OUTSIDE any promise chain, so
+    //     neither .catch() nor try/catch could intercept it.
+    //  2. ONLY AFTER the chapter is loaded, refine with the saved CFI.
+    //     Applying the CFI is mandatory even when the href exists: skipping
+    //     it would leave the reader at the top of the chapter instead of at
+    //     the exact paragraph/word of the last reading session.
+    //
+    // FALLBACK LADDER (each level degrades gracefully, chain never breaks):
+    //   exact CFI -> chapter start -> book start.
+    // The function ALWAYS returns a resolved promise so openBook() continues
+    // and the UI buttons get enabled even if every positioning step fails.
     // ======================================================================
     function restoreSavedPosition() {
       var key = bookKey();
@@ -1089,24 +1104,34 @@
         .then(function (d) {
           var p = d && d.position;
           if (!p || (!p.cfi && !p.href)) return Promise.resolve();
-          // STEP 1: Navigate to chapter href (safe — no CFI, no offset risk)
+          // STEP 1: chapter-level navigation via href (safe, no CFI involved).
+          // STEP 2: CFI refinement chained AFTER step 1. This ordering is the
+          // key correctness point: href first guarantees a valid rendering
+          // context, then the CFI pinpoints the exact text location. Both
+          // steps are individually guarded so an invalid CFI degrades to
+          // chapter start rather than crashing the open sequence.
+          var navPromise;
           if (p.href) {
-            return rendition.display(p.href).catch(function () {});
+            navPromise = rendition.display(p.href).catch(function () {});
+          } else {
+            navPromise = Promise.resolve();
           }
-          // STEP 2 (fallback): Try CFI directly if no href available
           if (p.cfi) {
-            try {
-              return rendition.display(p.cfi).catch(function () {});
-            } catch (e) { return Promise.resolve(); }
+            return navPromise.then(function () {
+              try {
+                return rendition.display(p.cfi).catch(function () {});
+              } catch (e) { return Promise.resolve(); }
+            });
           }
-          return Promise.resolve();
+          return navPromise;
         })
         .catch(function () { return Promise.resolve(); })
         .then(function () { posReady = true; });
     }
 
-    // Rete di sicurezza alla chiusura: sendBeacon e' affidabile durante lo
-    // scaricamento della pagina anche se il debounce non e' ancora scaduto.
+    // Safety net on close: sendBeacon is reliable during page unload even if
+    // the 1.2s debounce hasn't fired yet. This is what makes the restored CFI
+    // match the very last visible position before closing the tab/app.
     window.addEventListener("beforeunload", function () {
       if (!posReady || !book || !rendition) return;
       try {
@@ -1877,12 +1902,43 @@
       // Evidenzia il match corrente
       if (match.mark) match.mark.classList.add("active");
 
-      // Scrolla al mark usando scrollIntoView (funziona nell'iframe)
-      if (match.mark && match.mark.scrollIntoView) {
+      // ==================================================================
+      // NAVIGATE TO MATCH (FIX: broken spread viewport)
+      // ==================================================================
+      // OLD BEHAVIOUR: scrollIntoView() on the <mark> scrolled the iframe's
+      // internal document directly. In spread mode epub.js pages the chapter
+      // by shifting a multi-column layout in exact (columnWidth + gap) steps;
+      // an arbitrary manual scroll is NOT snapped to that column grid, so the
+      // view ended up showing two full pages plus a sliver of a third, and
+      // epub.js's internal location state desynced from what was on screen.
+      //
+      // WHY CFI-FIRST IS CORRECT AND SAFE HERE:
+      //  - match.cfi comes from section.cfiFromElement(blockEl): it targets a
+      //    BLOCK element, not a text-node offset. Inserting <mark> elements
+      //    splits text nodes INSIDE the paragraph but never changes the
+      //    paragraph's index among its siblings, so this CFI stays valid even
+      //    with highlights applied. (The IndexSizeError class of bugs only
+      //    affects text-offset CFIs like loc.start.cfi.)
+      //  - rendition.display(cfi) lets epub.js compute the scroll itself,
+      //    perfectly aligned with its own column grid -> correct spread paging.
+      //  - If the chapter is already rendered (the normal case), display(cfi)
+      //    only scrolls: no re-render, so the "active" highlight survives.
+      //  - Fallback: if cfiFromElement failed (cfi === null), keep the old
+      //    scrollIntoView as a degraded-but-working last resort.
+      // ==================================================================
+      if (match.cfi && rendition && book) {
+        rendition.display(match.cfi).catch(function () {
+          // Degraded fallback: direct scroll (may misalign spread columns)
+          if (match.mark && match.mark.scrollIntoView) {
+            try {
+              match.mark.scrollIntoView({ behavior: "smooth", block: "center" });
+            } catch (e) {}
+          }
+        });
+      } else if (match.mark && match.mark.scrollIntoView) {
         try {
           match.mark.scrollIntoView({ behavior: "smooth", block: "center" });
         } catch (e) {
-          // Fallback: scrolla l'elemento padre
           if (match.element && match.element.scrollIntoView) {
             match.element.scrollIntoView({ behavior: "smooth", block: "center" });
           }

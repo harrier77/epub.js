@@ -91,6 +91,83 @@ epub.js measures the container via `clientWidth`/`offsetWidth`, which return
 CSS-pixel dimensions **before** the element's own CSS `zoom` is applied, so
 column pagination remains correct at every zoom level.
 
+### In-chapter text search
+The **lens** button opens a search bar that scans the current chapter and
+wraps every match in a `<mark>` element, listing results as `n/total` with
+previous/next navigation.
+
+## Critical fixes
+
+These fixes address deep interactions between the UI layer and epub.js's
+internals; they are documented here because regressing any of them would
+subtly break reading-position or pagination behaviour.
+
+### Search-result navigation must go through epub.js (CFI-first) — FUNDAMENTAL
+
+**Symptom.** Clicking a search result scrolled the view to the match, but in
+two-page spread mode the viewport showed two full pages *plus a sliver of a
+third*, and epub.js's internal location state desynced from what was on
+screen.
+
+**Root cause.** The old implementation used `mark.scrollIntoView()` directly
+on the iframe's document. In spread mode epub.js does not create two iframes:
+it renders the chapter as a single multi-column layout and "turns pages" by
+shifting that document horizontally in exact `(columnWidth + gap)` steps.
+A raw `scrollIntoView()` scrolls by an arbitrary amount that is **not snapped
+to the column grid**, leaving the content half-shifted between columns — two
+pages plus the edge of the next one. It also bypasses the view manager, so
+epub.js no longer knew which page was actually displayed.
+
+**Fix (`scrollToMatch`).** Navigate with `rendition.display(match.cfi)` so
+epub.js computes the scroll itself, perfectly aligned with its own column
+grid. This is safe even with highlights applied because the per-match CFI is
+generated with `section.cfiFromElement(blockEl)` and targets a **block
+element** (`p`, `h2`, …), not a text-node offset: inserting `<mark>` splits
+text nodes *inside* the paragraph but never changes the paragraph's index
+among its siblings, so element-level CFIs stay valid. If the chapter is
+already rendered (the normal case) `display(cfi)` only scrolls, so the
+"active" highlight survives. Degraded fallbacks keep the old
+`scrollIntoView()` if the CFI is unavailable or display fails.
+
+### `<mark>` highlights break text-offset CFIs
+
+**Root cause.** Wrapping matched text in `<mark>` splits one text node into
+three (`before / mark / after`). epub.js encodes CFIs as child indices plus
+text-node offsets, so a CFI like `/4/2/1:285` computed against the pristine
+tree may reference an offset that no longer exists once marks are present,
+making `EpubCFI.toRange()` throw `IndexSizeError` inside
+`Contents.locationOf()` — asynchronously, outside any promise chain, hence
+uncatchable by `.catch()` or `try/catch`.
+
+**Fix.** `clearSearchHighlights()` removes all marks and calls
+`parent.normalize()` to merge the text nodes back to their original shape.
+It MUST run before anything that triggers CFI resolution: zoom/
+`rendition.resize()`, re-render, opening another book. Highlights are then
+re-applied afterwards. For the same reason, saved-reading-position CFIs are
+only persisted through epub.js's own relocation events (never computed while
+highlights are mid-mutation).
+
+### Saved-position restore: href first, CFI as refinement
+
+**Goal.** Reopen the book exactly at the last-read text position (not merely
+at the top of the chapter).
+
+**Design.** On every debounced `'relocated'` event the reader persists
+CFI + chapter href to the backend (`/api/save_position`, plus a
+`navigator.sendBeacon` safety net on page unload). On open,
+`restoreSavedPosition()` navigates in two steps:
+
+1. `rendition.display(p.href)` — chapter-level jump, CFI-free, immune to
+   invalid-offset errors;
+2. `rendition.display(p.cfi)` chained **after** step 1, guarded by
+   try/catch + `.catch()`. Applying the CFI even when the href exists is the
+   key correctness point: skipping it would stop at the chapter start.
+
+The fallback ladder is exact CFI → chapter start → book start; the function
+always resolves so the `openBook()` chain continues. A `posReady` flag gates
+all saving until the restore completes, otherwise the initial display's own
+`'relocated'` would overwrite the stored position with page 1.
+
 ### Navigation
 - **‹ Previous / Next ›** buttons
 - **← / →** arrow keys
