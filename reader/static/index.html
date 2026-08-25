@@ -811,6 +811,7 @@
       <span id="ieTitle">Modifica paragrafo</span>
        <button id="ieModeFrag" class="ieModeBtn" title="Modifica solo il frammento di testo cliccato">Frammento</button>
        <button id="ieModeFull" class="ieModeBtn" title="Modifica l'intero paragrafo (HTML)">Intero</button>
+       <button id="ieItalic" class="ieModeBtn" title="Rendi corsivo il testo selezionato nel campo Frammento (passa alla modalità Intero con &lt;i&gt;…&lt;/i&gt; inserito)">𝑖</button>
        <button id="ieSave">💾 Salva</button>
        <button id="ieCancel">Annulla</button>
       <button id="ieClose" title="Chiudi (Esc)">✕</button>
@@ -2863,6 +2864,27 @@
       } catch (e) { return ""; }
     }
 
+    // CRITICAL FIX (pageno anchors): strips paper-edition page markers
+    // (<a class="pageno" title="[Pg N]"></a>, typical of Project Gutenberg
+    // EPUBs) from a paragraph's outerHTML. These anchors are ALREADY in the
+    // source file as children of almost every <p>; they are empty and
+    // invisible while reading, but they leaked into the "Intero" editor view
+    // and into every saved chapter, looking like spurious insertions.
+    // IMPORTANT: parsing goes through DOMParser instead of a regex so that
+    // attribute order/spacing variations are handled safely. Applied at EVERY
+    // point where paragraph HTML enters ieCode or the save pipeline.
+    function stripPagenoAnchors(html) {
+      try {
+        var d = new DOMParser().parseFromString("<div>" + html + "</div>", "text/html");
+        var as = d.querySelectorAll("a.pageno, a[id^='Page_']");
+        for (var i = 0; i < as.length; i++) {
+          if (as[i].parentNode) as[i].parentNode.removeChild(as[i]);
+        }
+        var p = d.body && d.body.firstElementChild;
+        return p ? p.innerHTML : html;
+      } catch (e) { return html; }
+    }
+
     // Modalita' del popover: "frag" = solo il pezzo cliccato, "full" =
     // l'intero paragrafo in HTML (come prima). Da frammento a intero applica
     // l'edit corrente al nodo testo, cosi' resta nella serializzazione.
@@ -2879,14 +2901,99 @@
         ieCode.style.display = "none";
         autoGrowVisibleFrags(); // se il popover e' gia' visibile, adatta l'altezza
       } else {
-        // Intero (o paragrafo senza nodi testo): HTML grezzo come prima
+        // Intero (o paragrafo senza nodi testo): HTML grezzo come prima.
+        // stripPagenoAnchors keeps pageno markers out of the editor/save path.
         ieFrags.style.display = "none";
         ieCode.style.display = "block";
         try {
-          ieCode.value = inlineCtx.element.outerHTML.replace(/\s*[\r\n]+\s*/g, " ");
+          ieCode.value = stripPagenoAnchors(inlineCtx.element.outerHTML.replace(/\s*[\r\n]+\s*/g, " "));
         } catch (e) {}
       }
     }
+
+    // Italic button (fragment mode): wraps the current selection of the
+    // fragment field in <i>…</i>. Operates on the LIVE chapter DOM:
+    // writes the (normalized) field value into the text node, then splits
+    // that node around the selection and reparents the middle part into a
+    // new <i> element. Finally switches to "Intero" mode WITHOUT going
+    // through applyFragField(): that would call node.nodeValue= on the old
+    // node reference (now emptied/split) and duplicate the text. Saving
+    // serializes outerHTML, so the new <i> ends up in the file.
+    function italicizeFragSelection() {
+      if (!inlineCtx || inlineCtx.mode !== "frag") {
+        setStatus("Il pulsante corsivo funziona in modalità Frammento.");
+        return;
+      }
+      var ta = ieFrags.querySelector("textarea.ieFrag");
+      if (!ta) return;
+      var v = String(ta.value);
+      var s = ta.selectionStart, e = ta.selectionEnd;
+      if (s == null || e == null) { s = 0; e = v.length; }
+      if (s === e) {
+        setStatus("Seleziona prima il testo da rendere corsivo nel campo.");
+        return;
+      }
+      // Nodo testo su cui operare: per una selezione trascinata applica
+      // prima l'edit dello span (il testo vive tutto in sNode), poi usa
+      // gli offset aggiornati; altrimenti è il nodo del campo frammento.
+      var node;
+      if (ta.dataset && ta.dataset.span === "1" && inlineCtx.selSpan) {
+        applySelField(v);
+        var sp = inlineCtx.selSpan;
+        node = sp.sNode;
+        s = sp.sOff + s;
+        e = sp.sOff + e;
+        inlineCtx.selSpan = null;
+      } else {
+        node = inlineCtx.textNodes ? inlineCtx.textNodes[parseInt(ta.dataset.fragIndex, 10) || 0] : null;
+      }
+      if (!node || !node.parentNode) return;
+      var doc = inlineCtx.doc;
+      try {
+        // Align the text node with the (normalized) field value first,
+        // otherwise selection offsets would not match node content.
+        node.nodeValue = v;
+        // CRITICAL: wrap [s,e) in <i> WITHOUT Range.surroundContents.
+        // surroundContents extracts/reinserts range content and its result
+        // proved engine-dependent (it produced unexpected elements instead
+        // of <i>). splitText() is deterministic: physically split the text
+        // node into three parts and reparent the middle one into a new <i>;
+        // no range extraction is involved, so nothing else can move —
+        // including sibling anchors like the pageno ones.
+        var len = node.nodeValue.length;
+        var mid;
+        if (s <= 0 && e >= len) {
+          mid = node;                       // whole node becomes italic
+        } else {
+          if (e < len) node.splitText(e);   // split off the tail (stays outside)
+          mid = (s > 0) ? node.splitText(s) : node; // middle = selected part
+        }
+        // Same namespace as the document (XHTML in EPUBs)
+        var ns = doc.documentElement && doc.documentElement.namespaceURI;
+        var ns = doc.documentElement && doc.documentElement.namespaceURI;
+        var iEl = ns ? doc.createElementNS(ns, "i") : doc.createElement("i");
+        mid.parentNode.insertBefore(iEl, mid);
+        iEl.appendChild(mid);
+      } catch (err) {
+        setStatus("Impossibile applicare il corsivo alla selezione.");
+        return;
+      }
+      // Manual switch to "Intero" mode WITHOUT applyFragField (see note
+      // above): show the updated HTML containing the new <i>. pageno anchors
+      // are stripped here too so they never reach editor or save output.
+      inlineCtx.mode = "full";
+      document.getElementById("ieModeFrag").classList.remove("active");
+      document.getElementById("ieModeFull").classList.add("active");
+      ieFrags.innerHTML = "";
+      ieFrags.style.display = "none";
+      try {
+        ieCode.value = stripPagenoAnchors(inlineCtx.element.outerHTML.replace(/\s*[\r\n]+\s*/g, " "));
+      } catch (e2) {}
+      ieCode.style.display = "block";
+      focusInlineField();
+      setStatus("Corsivo applicato: controlla l'HTML e salva.");
+    }
+    document.getElementById("ieItalic").addEventListener("click", italicizeFragSelection);
 
     // Un SOLO campo: lo span ESATTO della selezione (se presente), altrimenti
     // il nodo testo cliccato per intero. Gli altri pezzi restano invisibili.
@@ -3179,8 +3286,10 @@
       // il paragrafo dal DOM live (tag e attributi restano intatti).
       if (ctx.mode !== "full" && ctx.textNodes && ctx.textNodes.length) {
         applyFragField();
+        // Save path: re-serialize the paragraph from the live DOM, with
+        // pageno anchors stripped so they never land in the saved EPUB.
         try {
-          ieCode.value = ctx.element.outerHTML.replace(/\s*[\r\n]+\s*/g, " ");
+          ieCode.value = stripPagenoAnchors(ctx.element.outerHTML.replace(/\s*[\r\n]+\s*/g, " "));
         } catch (e) {}
       }
       var newHtml = ieCode.value.trim();
