@@ -168,6 +168,31 @@ always resolves so the `openBook()` chain continues. A `posReady` flag gates
 all saving until the restore completes, otherwise the initial display's own
 `'relocated'` would overwrite the stored position with page 1.
 
+### Inline fragment editor: user-typed markup (validate-and-replace)
+
+In "Frammento" mode the field edits a single text node. A text node can never
+contain elements, so writing `...<i>sleepy</i>...` through `nodeValue` stores
+literal tags that serialize as `&lt;i&gt;` and never render as italics.
+Instead of DOM surgery (offset math / `splitText`, previously buggy), the
+editor uses a deterministic **validate-and-replace** strategy:
+
+1. If the edited value contains `<`, it is parsed with `DOMParser` as XML,
+   wrapped in the chapter document's namespace (EPUBs are XHTML).
+2. Validation enforces a whitelist — only `i`, `em`, `b`, `strong`, `u`,
+   nestable, with **no attributes**. Anything else is rejected with a status
+   message and the DOM is left untouched.
+3. On success the text node is replaced by the parsed nodes via
+   `importNode` + `replaceChild`; the context arrays (`textNodes`,
+   `allTextNodes`, `origFrags`, `origAll`) are spliced so fragment navigation
+   ("1/N") and restore-on-close stay consistent.
+4. Invalid markup aborts both mode switching (stays in Frammento) and saving.
+
+Both entry paths are covered: plain click (`fragIndex`) and drag/tap selection
+(`selSpan`). For selections the typed markup is pre-validated first, applied
+as text, then the resulting node content is re-parsed and replaced — otherwise
+`applySelField` would write escaped literals into `nodeValue`. The dedicated
+italic button was removed; users type `<i>…</i>` directly in the fragment.
+
 ### Navigation
 - **‹ Previous / Next ›** buttons
 - **← / →** arrow keys

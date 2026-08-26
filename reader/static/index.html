@@ -811,7 +811,6 @@
       <span id="ieTitle">Modifica paragrafo</span>
        <button id="ieModeFrag" class="ieModeBtn" title="Modifica solo il frammento di testo cliccato">Frammento</button>
        <button id="ieModeFull" class="ieModeBtn" title="Modifica l'intero paragrafo (HTML)">Intero</button>
-       <button id="ieItalic" class="ieModeBtn" title="Rendi corsivo il testo selezionato nel campo Frammento (passa alla modalità Intero con &lt;i&gt;…&lt;/i&gt; inserito)">𝑖</button>
        <button id="ieSave">💾 Salva</button>
        <button id="ieCancel">Annulla</button>
       <button id="ieClose" title="Chiudi (Esc)">✕</button>
@@ -2891,7 +2890,9 @@
     function setInlineMode(mode) {
       if (!inlineCtx) return;
       var hasFrags = !!(inlineCtx.textNodes && inlineCtx.textNodes.length);
-      if (mode === "full" && inlineCtx.mode === "frag" && hasFrags) applyFragField();
+      // Se il frammento contiene markup invalido restiamo in modalità
+      // Frammento così l'utente può correggerlo senza perdere l'edit.
+      if (mode === "full" && inlineCtx.mode === "frag" && hasFrags && !applyFragField()) return;
       inlineCtx.mode = hasFrags ? mode : "full";
       document.getElementById("ieModeFrag").classList.toggle("active", inlineCtx.mode === "frag");
       document.getElementById("ieModeFull").classList.toggle("active", inlineCtx.mode === "full");
@@ -2911,89 +2912,6 @@
       }
     }
 
-    // Italic button (fragment mode): wraps the current selection of the
-    // fragment field in <i>…</i>. Operates on the LIVE chapter DOM:
-    // writes the (normalized) field value into the text node, then splits
-    // that node around the selection and reparents the middle part into a
-    // new <i> element. Finally switches to "Intero" mode WITHOUT going
-    // through applyFragField(): that would call node.nodeValue= on the old
-    // node reference (now emptied/split) and duplicate the text. Saving
-    // serializes outerHTML, so the new <i> ends up in the file.
-    function italicizeFragSelection() {
-      if (!inlineCtx || inlineCtx.mode !== "frag") {
-        setStatus("Il pulsante corsivo funziona in modalità Frammento.");
-        return;
-      }
-      var ta = ieFrags.querySelector("textarea.ieFrag");
-      if (!ta) return;
-      var v = String(ta.value);
-      var s = ta.selectionStart, e = ta.selectionEnd;
-      if (s == null || e == null) { s = 0; e = v.length; }
-      if (s === e) {
-        setStatus("Seleziona prima il testo da rendere corsivo nel campo.");
-        return;
-      }
-      // Nodo testo su cui operare: per una selezione trascinata applica
-      // prima l'edit dello span (il testo vive tutto in sNode), poi usa
-      // gli offset aggiornati; altrimenti è il nodo del campo frammento.
-      var node;
-      if (ta.dataset && ta.dataset.span === "1" && inlineCtx.selSpan) {
-        applySelField(v);
-        var sp = inlineCtx.selSpan;
-        node = sp.sNode;
-        s = sp.sOff + s;
-        e = sp.sOff + e;
-        inlineCtx.selSpan = null;
-      } else {
-        node = inlineCtx.textNodes ? inlineCtx.textNodes[parseInt(ta.dataset.fragIndex, 10) || 0] : null;
-      }
-      if (!node || !node.parentNode) return;
-      var doc = inlineCtx.doc;
-      try {
-        // Align the text node with the (normalized) field value first,
-        // otherwise selection offsets would not match node content.
-        node.nodeValue = v;
-        // CRITICAL: wrap [s,e) in <i> WITHOUT Range.surroundContents.
-        // surroundContents extracts/reinserts range content and its result
-        // proved engine-dependent (it produced unexpected elements instead
-        // of <i>). splitText() is deterministic: physically split the text
-        // node into three parts and reparent the middle one into a new <i>;
-        // no range extraction is involved, so nothing else can move —
-        // including sibling anchors like the pageno ones.
-        var len = node.nodeValue.length;
-        var mid;
-        if (s <= 0 && e >= len) {
-          mid = node;                       // whole node becomes italic
-        } else {
-          if (e < len) node.splitText(e);   // split off the tail (stays outside)
-          mid = (s > 0) ? node.splitText(s) : node; // middle = selected part
-        }
-        // Same namespace as the document (XHTML in EPUBs)
-        var ns = doc.documentElement && doc.documentElement.namespaceURI;
-        var ns = doc.documentElement && doc.documentElement.namespaceURI;
-        var iEl = ns ? doc.createElementNS(ns, "i") : doc.createElement("i");
-        mid.parentNode.insertBefore(iEl, mid);
-        iEl.appendChild(mid);
-      } catch (err) {
-        setStatus("Impossibile applicare il corsivo alla selezione.");
-        return;
-      }
-      // Manual switch to "Intero" mode WITHOUT applyFragField (see note
-      // above): show the updated HTML containing the new <i>. pageno anchors
-      // are stripped here too so they never reach editor or save output.
-      inlineCtx.mode = "full";
-      document.getElementById("ieModeFrag").classList.remove("active");
-      document.getElementById("ieModeFull").classList.add("active");
-      ieFrags.innerHTML = "";
-      ieFrags.style.display = "none";
-      try {
-        ieCode.value = stripPagenoAnchors(inlineCtx.element.outerHTML.replace(/\s*[\r\n]+\s*/g, " "));
-      } catch (e2) {}
-      ieCode.style.display = "block";
-      focusInlineField();
-      setStatus("Corsivo applicato: controlla l'HTML e salva.");
-    }
-    document.getElementById("ieItalic").addEventListener("click", italicizeFragSelection);
 
     // Un SOLO campo: lo span ESATTO della selezione (se presente), altrimenti
     // il nodo testo cliccato per intero. Gli altri pezzi restano invisibili.
@@ -3028,19 +2946,119 @@
       ieFrags.appendChild(row);
     }
 
-    // Riscrive il valore del campo nel DOM live: per lo span distribuisce la
-    // stringa modificata su head/testa e coda dei nodi toccati, senza mai
-    // toccare la struttura HTML.
+    // Riscrive il valore del campo nel DOM live. Se il valore contiene
+    // markup (<i>…</i> and similar) it validates it as XML and REPLACES the
+    // text node with the parsed nodes; otherwise it just updates nodeValue.
+    // CRITICAL: a text node can never contain elements — writing "...<i>x</i>"
+    // via nodeValue would store literal tags that serialize as &lt;i&gt; and
+    // never render. Returns false on invalid markup (DOM untouched) so callers
+    // abort mode switch / save.
     function applyFragField() {
       var ta = ieFrags.querySelector("textarea.ieFrag");
-      if (!ta || !inlineCtx) return;
+      if (!ta || !inlineCtx) return true;
       var val = ta.value.replace(/\s*[\r\n]+\s*/g, " ");
-      if (ta.dataset && ta.dataset.span === "1") { applySelField(val); return; }
-      if (!inlineCtx.textNodes) return;
-      var node = inlineCtx.textNodes[parseInt(ta.dataset.fragIndex, 10) || 0];
-      if (node) {
-        try { node.nodeValue = val; } catch (e) {}
+      if (ta.dataset && ta.dataset.span === "1") {
+        // Selection-span path needs markup handling too: applySelField writes
+        // plain text into nodeValue, so typed tags would end up as escaped
+        // literals (&lt;i&gt;) that never render. Strategy: pre-validate ONLY
+        // the typed markup (an invalid fragment never touches the DOM), apply
+        // the edit as text, then re-parse the node content and replace it with
+        // real element nodes.
+        if (/</.test(val)) {
+          if (!parseMarkupFragment(val, inlineCtx.doc)) {
+            setStatus("Markup invalido o tag non ammesso nel frammento (consentiti: <i> <em> <b> <strong> <u>; devono essere bilanciati).");
+            return false;
+          }
+          applySelField(val);
+          var sn = inlineCtx.selSpan && inlineCtx.selSpan.sNode;
+          if (sn && /</.test(String(sn.nodeValue)) && !replaceTextNodeWithMarkup(sn, String(sn.nodeValue))) return false;
+        } else {
+          applySelField(val);
+        }
+        return true;
       }
+      if (!inlineCtx.textNodes) return true;
+      var node = inlineCtx.textNodes[parseInt(ta.dataset.fragIndex, 10) || 0];
+      if (!node) return true;
+      if (/</.test(val)) {
+        if (!replaceTextNodeWithMarkup(node, val)) {
+          setStatus("Markup invalido o tag non ammesso nel frammento (consentiti: <i> <em> <b> <strong> <u>; devono essere bilanciati).");
+          return false;
+        }
+        return true;
+      }
+      try { node.nodeValue = val; } catch (e) {}
+      return true;
+    }
+
+    // Valida 'val' come frammento XML nel namespace del documento del capitolo,
+    // ammette solo tag inline di formattazione semplice (i, em, b, strong, u),
+    // poi sostituisce 'node' con i nodi importati nel documento live.
+    // Aggiorna gli array di contesto (textNodes/allTextNodes/origFrags/origAll)
+    // in modo che indici e ripristino-on-close restino coerenti.
+    // Parsing+validazione di un frammento di markup utente nel namespace del
+    // documento del capitolo. Ritorna il Document parsato oppure null se
+    // malformato o contenente tag/attributi non ammessi.
+    function parseMarkupFragment(val, doc) {
+      try {
+        var ns = (doc.documentElement && doc.documentElement.namespaceURI) || "http://www.w3.org/1999/xhtml";
+        var wrap = '<wrap xmlns="' + ns + '">' + val + '</wrap>';
+        var parsed = new DOMParser().parseFromString(wrap, "application/xml");
+        if (parsed.getElementsByTagName("parsererror").length) return null;
+        // Whitelist: solo formattazione inline, nessun attributo arbitrario.
+        var allowed = { i: 1, em: 1, b: 1, strong: 1, u: 1 };
+        var els = parsed.documentElement.getElementsByTagName("*");
+        for (var k = 0; k < els.length; k++) {
+          var ln = (els[k].localName || "").toLowerCase();
+          if (!allowed[ln]) return null;
+          if (els[k].attributes && els[k].attributes.length) return null;
+        }
+        return parsed;
+      } catch (e) { return null; }
+    }
+
+    function replaceTextNodeWithMarkup(node, val) {
+      try {
+        var doc = node.ownerDocument;
+        var parsed = parseMarkupFragment(val, doc);
+        if (!parsed) return false;
+        // importNode is mandatory: DOMParser nodes belong to a different
+        // document than the live chapter (wrongDocumentError otherwise).
+        var frag = doc.createDocumentFragment();
+        var kids = Array.prototype.slice.call(parsed.documentElement.childNodes);
+        for (var j = 0; j < kids.length; j++) frag.appendChild(doc.importNode(kids[j], true));
+        if (!frag.firstChild) return false; // niente di concreto da inserire
+        // Nodi testo risultanti (profondità inclusa) per tenere gli array
+        // di navigazione/ripristino allineati alla nuova struttura.
+        var newTN = [];
+        (function walk(n) {
+          for (var c = n.firstChild; c; c = c.nextSibling) {
+            if (c.nodeType === 3) newTN.push(c);
+            else if (c.nodeType === 1) walk(c);
+          }
+        })(frag);
+        node.parentNode.replaceChild(frag, node);
+        var tn = inlineCtx.textNodes || [];
+        var idx = tn.indexOf(node);
+        if (idx >= 0 && newTN.length) {
+          var args = [idx, 1].concat(newTN);
+          Array.prototype.splice.apply(tn, args);
+          if (inlineCtx.origFrags) {
+            var vals = newTN.map(function (n2) { return n2.nodeValue || ""; });
+            Array.prototype.splice.apply(inlineCtx.origFrags, [idx, 1].concat(vals));
+          }
+          var all = inlineCtx.allTextNodes || [];
+          var aidx = all.indexOf(node);
+          if (aidx >= 0) {
+            Array.prototype.splice.apply(all, [aidx, 1].concat(newTN));
+            if (inlineCtx.origAll) {
+              var vals2 = newTN.map(function (n3) { return n3.nodeValue || ""; });
+              Array.prototype.splice.apply(inlineCtx.origAll, [aidx, 1].concat(vals2));
+            }
+          }
+        }
+        return true;
+      } catch (e) { return false; }
     }
 
     // Scrive la stringa editata DENTRO lo span selezionato: head resta prima,
@@ -3285,7 +3303,9 @@
       // Modalita' frammento: applica l'edit al SUO nodo testo e riserializza
       // il paragrafo dal DOM live (tag e attributi restano intatti).
       if (ctx.mode !== "full" && ctx.textNodes && ctx.textNodes.length) {
-        applyFragField();
+        // Markup invalido nel frammento: blocca il salvataggio, nulla è
+        // stato scritto nel DOM live.
+        if (!applyFragField()) return;
         // Save path: re-serialize the paragraph from the live DOM, with
         // pageno anchors stripped so they never land in the saved EPUB.
         try {
