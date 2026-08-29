@@ -33,7 +33,12 @@ from datetime import datetime
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# realpath() risolve gli eventuali symlink: se app.py viene lanciato.
+# tramite un symlink da un'altra cartella, __file__ punterebbe al path del
+# symlink e static/ verrebbe cercata nella cartella sbagliata. Con realpath
+# otteniamo sempre la directory del file VERO, quindi static/ resta valida
+# anche quando il programma viene avviato come symlink da altro percorso.
+BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # File di configurazione dell'utente: ~/.epubreader/config.ini
