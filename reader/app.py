@@ -278,6 +278,14 @@ def health():
     return jsonify(status="ok")
 
 
+@app.route("/api/config")
+def api_config():
+    """Espone la configurazione corrente al frontend (es. il percorso
+    filesystem reale della cartella esterna /ext/ = BOOK_DIR)."""
+    return jsonify(book_dir=BOOK_DIR)
+
+
+
 def _valid_book_key(book):
     """True se `book` e' una chiave libro valida (stessa regola di
     /api/save_chapter): "ext", "extepub:N" o basename .epub."""

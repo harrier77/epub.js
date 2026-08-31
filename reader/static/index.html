@@ -878,6 +878,7 @@
     var fileEls = {};    // href -> elemento riga nella sidebar
     var currentBookUrl = null;
     var currentHref = null;   // href del capitolo visualizzato (per l'editor)
+    var bookDirPath = "";     // percorso filesystem della cartella /ext/ (da /api/config)
     var viewer = document.getElementById("viewer");
     var statusEl = document.getElementById("status");
     var bookListEl = document.getElementById("bookList");
@@ -1680,7 +1681,10 @@
         });
       }).then(function (text) {
         metaCode.value = text;
-        metaPathEl.textContent = "Modifica: " + metaOpfPath;
+        var metaFull = (bookDirPath && isFolderBook())
+          ? "   [" + bookDirPath.replace(/\\/g, "/") + "/" + metaOpfPath + "]"
+          : "";
+        metaPathEl.textContent = "Modifica: " + metaOpfPath + metaFull;
         metaSave.disabled = false;
         metaEditor.classList.add("open");
         metaEditor.setAttribute("aria-hidden", "false");
@@ -2353,7 +2357,10 @@
       // ricavato dalla sezione dello spine (l'href può essere relativo al package).
       var section = book.spine ? book.spine.get(currentHref) : null;
       var src = section && section.url ? section.url : currentHref;
-      fileLabel.textContent = "Modifica: " + src;
+      var fullPath = (bookDirPath && isFolderBook())
+        ? "   [" + bookDirPath.replace(/\\/g, "/") + "/" + src + "]"
+        : "";
+      fileLabel.textContent = "Modifica: " + src + fullPath;
       ta.value = "Caricamento…";
       book.archive.request(src, "text").then(function (text) {
         ta.value = text;
@@ -3454,6 +3461,12 @@
 
     // All'avvio carica l'elenco dei libri serviti da Flask
     loadBookList();
+
+    // Carica il percorso filesystem della cartella esterna /ext/ (BOOK_DIR)
+    fetch("/api/config").then(function (r) { return r.json(); })
+      .then(function (cfg) {
+        if (cfg && cfg.book_dir) bookDirPath = String(cfg.book_dir);
+      }).catch(function () {});
 
     // PWA: registrazione service worker
     if ('serviceWorker' in navigator) {
