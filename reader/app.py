@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Piccolo lettore EPUB basato su epub.js servito da Flask.
 
 Uso:
-    python3 app.py            # avvia il server su http://127.0.0.1:5000
-    python3 app.py --port 8080
-    python3 app.py --book-dir "C:\\percorso\\target"   # epub non impacchettato
+    python app.py             # avvia il server su http://127.0.0.1:5000
+    python app.py --port 8080
+    python app.py --book-dir "C:\\percorso\\target"    # epub non impacchettato
 
 Al primo avvio scarica un libro di esempio (Alice nel Paese delle
 Meraviglie) da https://s3.amazonaws.com/epubjs/books/alice.epub e lo
