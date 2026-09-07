@@ -811,6 +811,7 @@
       <span id="ieTitle">Modifica paragrafo</span>
        <button id="ieModeFrag" class="ieModeBtn" title="Modifica solo il frammento di testo cliccato">Frammento</button>
        <button id="ieModeFull" class="ieModeBtn" title="Modifica l'intero paragrafo (HTML)">Intero</button>
+       <button id="ieMergePrev" class="ieModeBtn" title="Unisce questo paragrafo al precedente: il tag/contenitore del precedente viene conservato, tutto il contenuto inline (em, strong, a, …) di entrambi viene preservato, tra i due viene inserito un singolo spazio">⤺ Unisci al prec.</button>
        <button id="ieSave">💾 Salva</button>
        <button id="ieCancel">Annulla</button>
       <button id="ieClose" title="Chiudi (Esc)">✕</button>
@@ -3387,6 +3388,119 @@
     document.getElementById("ieModeFull").addEventListener("click", function () {
       setInlineMode("full");
       focusInlineField();
+    });
+
+    // Unione col paragrafo precedente (salvaguardia di tutti i tag):
+    // - il contenitore conservato e' quello del PRECEDENTE (tag + attributi
+    //   intatti: <p class=…>, <h2 id=…>, <li>, <blockquote>…);
+    // - tutto il contenuto inline del paragrafo corrente (nodi testo, <em>,
+    //   <strong>, <a>, <i>…) viene SPOSTATO (non serializzato come testo)
+    //   in coda al precedente, quindi nessun tag si perde o viene escapato;
+    // - tra i due blocchi viene inserito un singolo spazio testuale solo se
+    //   serve (cioe' se il precedente non termina e il corrente non inizia
+    //   gia' con spazio/punteggiatura di chiusura);
+    // - le ancore <a class="pageno"> vengono scartate dal merge (come gia'
+    //   avviene nel salvataggio normale via stripPagenoAnchors);
+    // - l'operazione lavora sul documento PULITO dell'archive (stessa
+    //   tecnica di buildEditedChapter), poi riusa patch/save/re-render.
+    function buildMergedChapter(ctx) {
+      return book.archive.request("/" + ctx.archPath, "text").then(function (origText) {
+        var rawText = String(origText || "").replace(/^\uFEFF/, "");
+        var cleanText = rawText.replace(/^\s*<\?xml[^>]*\?>\s*/, "");
+        var cleanDoc = new DOMParser().parseFromString(cleanText, "application/xhtml+xml");
+        if (cleanDoc.getElementsByTagName("parsererror").length) {
+          throw new Error("il documento non e' XHTML valido");
+        }
+        var path = [];
+        var el = ctx.element;
+        while (el && el.nodeType === 1 && el !== ctx.doc.documentElement) {
+          var parent = el.parentNode;
+          var idx = -1;
+          if (parent) {
+            var kids = parent.children;
+            for (var i = 0; i < kids.length; i++) {
+              if (kids[i] === el) { idx = i; break; }
+            }
+          }
+          path.unshift(idx);
+          el = parent;
+        }
+        var target = cleanDoc.documentElement;
+        for (var j = 0; j < path.length && target; j++) {
+          target = target.children[path[j]];
+        }
+        if (!target) throw new Error("elemento non trovato nel documento originale");
+        var prev = target.previousElementSibling;
+        // Salta nodi non-blocco (es. ancore pagina orfane tra i paragrafi)
+        while (prev && !INLINE_BLOCK_RE.test((prev.localName || prev.tagName || ""))) {
+          prev = prev.previousElementSibling;
+        }
+        if (!prev) throw new Error("nessun paragrafo precedente a cui unire");
+        // Rimuove eventuali pageno-anchor dentro entrambi (coerente con stripPagenoAnchors)
+        [prev, target].forEach(function (blk) {
+          var as = blk.querySelectorAll("a.pageno, a[id^='Page_']");
+          for (var k = as.length - 1; k >= 0; k--) {
+            if (as[k].parentNode) as[k].parentNode.removeChild(as[k]);
+          }
+        });
+        // Spazio di giunzione solo se serve
+        var prevText = (prev.textContent || "");
+        var curFirst = (target.textContent || "").charAt(0);
+        var needSpace = prevText && !/[\s\u00a0]$/.test(prevText) &&
+                        curFirst && !/^[\s\u00a0.,;:!?…%)\]»”’]/.test(curFirst);
+        if (needSpace) prev.appendChild(cleanDoc.createTextNode(" "));
+        while (target.firstChild) prev.appendChild(target.firstChild);
+        target.parentNode.removeChild(target);
+        var m = /\<html[\s>]/i.exec(rawText);
+        var prefix = m ? rawText.substring(0, m.index) : "";
+        var out = prefix + cleanDoc.documentElement.outerHTML;
+        if (!/\<html\b[^>]*\bxmlns\s*=/i.test(out)) {
+          out = out.replace(/<html([ >])/i, '<html xmlns="http://www.w3.org/1999/xhtml"$1');
+        }
+        return { text: out, prevPath: path.slice(0, -1).concat([Array.prototype.indexOf.call(prev.parentNode.children, prev)]) };
+      });
+    }
+
+    document.getElementById("ieMergePrev").addEventListener("click", function () {
+      if (!inlineCtx || !book || !currentBookUrl) return;
+      var ctx = inlineCtx;
+      if (!confirm("Unire questo paragrafo al precedente? I tag di entrambi vengono conservati.")) return;
+      ieSave.disabled = true;
+      buildMergedChapter(ctx)
+        .then(function (r) {
+          return apiSaveChapter({
+            book: bookKey(),
+            href: ctx.archPath,
+            content: r.text,
+            silent: true
+          }).then(function (res) {
+            if (!res || !res.ok) throw new Error((res && res.error) || "salvataggio fallito");
+            return r;
+          });
+        })
+        .then(function (r) {
+          patchArchiveForChapter(ctx.archPath, r.text);
+          if (currentHref && ctx.href &&
+              currentHref.split("#")[0] === ctx.href.split("#")[0]) {
+            document.getElementById("codeEditor").value = r.text;
+          }
+          if (ctx.section) {
+            ctx.section.contents = undefined;
+            ctx.section.document = undefined;
+            ctx.section.output = undefined;
+          }
+          closeInlineEditor();
+          setStatus("Paragrafi uniti ✓");
+          if (rendition) {
+            clearSearchHighlights();
+            rendition.clear();
+            rendition.display(ctx.cfi || ctx.href).catch(function () {});
+          }
+        })
+        .catch(function (err) {
+          ieSave.disabled = false;
+          setStatus("Unione non riuscita: " + (err && err.message ? err.message : err));
+        });
     });
 
     ieCancel.addEventListener("click", closeInlineEditor);
