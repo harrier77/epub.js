@@ -75,6 +75,10 @@
     }
     #toolbar button:hover { background: #666; }
     #toolbar button:disabled { opacity: .4; cursor: default; }
+    #prev, #next { width: 4rem; font-size: 1.2rem; }
+    @media (max-width: 600px) {
+      #prev, #next { width: 2rem; }
+    }
     #libraryToggle.active { background: #777; }
     #title { flex: 1 0 80px; margin-left:2rem;text-align: left; font-weight: 600; overflow: hidden;
              white-space: nowrap; text-overflow: ellipsis; }
@@ -773,8 +777,8 @@
     <button id="libraryToggle" title="Libreria">📚</button>
     <button id="filesToggle" title="File inclusi nell'EPUB">📂</button>
     <button id="tocToggle" title="Indice dei capitoli (TOC)" disabled>☰</button>
-    <button id="prev" title="Pagina precedente" disabled style="width:4rem;font-size:1.2rem">‹</button>
-    <button id="next" title="Pagina successiva" disabled style="width:4rem;font-size:1.2rem">›</button>
+    <button id="prev" title="Pagina precedente" disabled>‹</button>
+    <button id="next" title="Pagina successiva" disabled>›</button>
       <button id="tabView" class="tab active">📖</button>
     <button id="tabEdit" class="tab" disabled>✏️</button>
     <button id="tabEditSel" class="tab actionBtn" title="Mostra l'editor in-context per il paragrafo appena cliccato nel lettore (clicca prima sul paragrafo)"  style="padding:0;font-size:22px">🔠</button>
