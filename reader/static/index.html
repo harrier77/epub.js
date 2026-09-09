@@ -1332,18 +1332,41 @@
       rendition.on("touchend", function (e) {
         if (swipeStartX == null) return;
         var t = e.changedTouches && e.changedTouches[0];
-        if (!t) { swipeStartX = null; return; }
-        var dx = t.clientX - swipeStartX;
-        var dy = t.clientY - swipeStartY;
-        var dt = performance.now() - swipeStartT;
+        var sx = swipeStartX, sy = swipeStartY, st = swipeStartT;
         swipeStartX = null;
+        handleSwipe(t, sx, sy, st);
+      });
+      // Fallback: dito partito sul padding/margine di #viewer (fuori dagli
+      // iframe interni di epub.js) — stessi criteri, stesso navigate().
+      // {passive:true}: non serve preventDefault, non blocca lo scroll.
+      var fbX = null, fbY = null, fbT = 0;
+      viewer.addEventListener("touchstart", function (e) {
+        if (e.target !== viewer) return; // dentro gli iframe ci pensa rendition
+        if (!e.touches || e.touches.length !== 1) { fbX = null; return; }
+        fbX = e.touches[0].clientX;
+        fbY = e.touches[0].clientY;
+        fbT = performance.now();
+      }, { passive: true });
+      viewer.addEventListener("touchend", function (e) {
+        if (fbX == null) return;
+        var t = e.changedTouches && e.changedTouches[0];
+        var sx = fbX, sy = fbY, st = fbT;
+        fbX = null;
+        handleSwipe(t, sx, sy, st);
+      }, { passive: true });
+      viewer.addEventListener("touchcancel", function () { fbX = null; }, { passive: true });
+      function handleSwipe(t, sx, sy, st) {
+        if (!t) return;
+        var dx = t.clientX - sx;
+        var dy = t.clientY - sy;
+        var dt = performance.now() - st;
         if (dt > 800 || dt < 30) return;              // gesto lento (selezione testo) o troppo corto
         if (Math.abs(dx) < 60) return;                // distanza minima per considerarlo uno swipe
         if (Math.abs(dx) < Math.abs(dy) * 1.5) return; // deve essere nettamente orizzontale
         // Stessa logica dei bottoni: rispetta i bordi del libro
         if (dx < 0 && !document.getElementById("next").disabled) navigate(1);
         else if (dx > 0 && !document.getElementById("prev").disabled) navigate(-1);
-      });
+      }
 
       // ====================================================================
       // INITIAL DISPLAY + POSITION RESTORATION CHAIN
