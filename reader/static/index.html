@@ -79,6 +79,24 @@
     @media (max-width: 600px) {
       #prev, #next { width: 2rem; }
     }
+    /* Autohide toolbar: nascosta via display (recupera spazio per il viewer).
+       La striscia #toolbarShowZone resta attiva in alto per farla riapparire. */
+    #toolbar.autohide-hidden { display: none; }
+    #toolbarShowZone {
+      display: none;
+      flex-shrink: 0;
+      height: 14px;
+      background: #2f2f2f;
+      color: #777;
+      font-size: 8px;
+      line-height: 14px;
+      text-align: center;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: pan-x pan-y;
+    }
+    #toolbarShowZone.on { display: block; }
     #libraryToggle.active { background: #777; }
     #title { flex: 1 0 80px; margin-left:2rem;text-align: left; font-weight: 600; overflow: hidden;
              white-space: nowrap; text-overflow: ellipsis; }
@@ -773,6 +791,7 @@
     <button id="searchClose" title="Close search">✕</button>
   </div>
 
+  <div id="toolbarShowZone" title="Mostra toolbar">&#9662;</div>
   <div id="toolbar">
     <button id="libraryToggle" title="Libreria">📚</button>
     <button id="filesToggle" title="File inclusi nell'EPUB">📂</button>
@@ -1513,6 +1532,7 @@
       var now = performance.now();
       if (now - lastNavAt < 200) return; // ignora i doppio-click
       lastNavAt = now;
+      hideToolbarAuto();
       var p = dir < 0 ? rendition.prev() : rendition.next();
       if (p && typeof p.catch === "function") {
         p.catch(function (err) { setStatus("Errore di navigazione: " + err); });
@@ -1520,6 +1540,47 @@
     }
     document.getElementById("prev").addEventListener("click", function () { navigate(-1); });
     document.getElementById("next").addEventListener("click", function () { navigate(1); });
+
+    // --- Autohide toolbar ---
+    // Default: visibile. Il primo swipe dal basso verso l'alto SULLA TOOLBAR
+    // attiva l'autohide e la nasconde; poi resta nascosta (spazio al viewer)
+    // e riappare con tap / swipe dall'alto verso il basso sulla striscia
+    // #toolbarShowZone. Lo scroll orizzontale e' ignorato (soglia su dy, dx).
+    var toolbarAutoHide = false;
+    function setToolbarHidden(h) {
+      document.getElementById("toolbar").classList.toggle("autohide-hidden", h);
+      document.getElementById("toolbarShowZone").classList.toggle("on", h && toolbarAutoHide);
+    }
+    function showToolbar() { setToolbarHidden(false); }
+    function hideToolbarAuto() { if (toolbarAutoHide) setToolbarHidden(true); }
+    (function () {
+      var tb = document.getElementById("toolbar");
+      var zone = document.getElementById("toolbarShowZone");
+      var sx = 0, sy = 0;
+      tb.addEventListener("touchstart", function (e) {
+        if (e.touches && e.touches.length) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }
+      }, { passive: true });
+      tb.addEventListener("touchend", function (e) {
+        if (!e.changedTouches || !e.changedTouches.length) return;
+        var dx = e.changedTouches[0].clientX - sx;
+        var dy = e.changedTouches[0].clientY - sy;
+        if (dy < -40 && Math.abs(dy) > Math.abs(dx) * 1.2) {
+          toolbarAutoHide = true; // primo swipe up: attiva l'autohide
+          setToolbarHidden(true);
+        }
+      }, { passive: true });
+      var zx = 0, zy = 0;
+      zone.addEventListener("touchstart", function (e) {
+        if (e.touches && e.touches.length) { zx = e.touches[0].clientX; zy = e.touches[0].clientY; }
+      }, { passive: true });
+      zone.addEventListener("touchend", function (e) {
+        if (!e.changedTouches || !e.changedTouches.length) { showToolbar(); return; }
+        var dx = e.changedTouches[0].clientX - zx;
+        var dy = e.changedTouches[0].clientY - zy;
+        if (dy > 24 && Math.abs(dy) > Math.abs(dx)) showToolbar();
+      }, { passive: true });
+      zone.addEventListener("click", showToolbar);
+    })();
 
     // Toggle pagina singola / doppia pagina affiancata
     document.getElementById("spreadToggle").addEventListener("click", function () {
