@@ -945,6 +945,7 @@
   <script>
     var book = null;
     var rendition = null;
+    var bookLang = null; // lingua dc:language dell'OPF (es. "it"); null = ancora ignota
     var spreadOn = true; // doppia pagina affiancata (default)
     var fileEls = {};    // href -> elemento riga nella sidebar
     var currentBookUrl = null;
@@ -1338,6 +1339,15 @@
       setStatus("Apertura del libro…");
 
       book = ePub(url);
+      bookLang = null; // reset: verra' letta dai metadati OPF qui sotto
+      // Legge dc:language dall'OPF: solo se it/en/fr/de l'hook injectHyphenIt
+      // propaghera' il lang ai capitoli per hyphens:auto.
+      if (book && book.loaded && book.loaded.metadata) {
+        book.loaded.metadata.then(function (meta) {
+          var l = meta && meta.language ? String(meta.language) : "";
+          bookLang = l.trim().toLowerCase().replace("_", "-");
+        }).catch(function () { bookLang = ""; });
+      }
       // Libro da cartella: shim dell'archive (editor HTML, patch, ricarica)
       // e pulsante "Ricarica" abilitato.
       if (isFolderBook()) installArchiveShim();
@@ -1354,6 +1364,7 @@
       // dopo cambi pagina / salvataggi. Il container della pagina madre viene
       // colorato subito: renderTo crea il div .epub-container in modo sincrono.
       rendition.hooks.content.register(injectBgTheme);
+      rendition.hooks.content.register(injectHyphenIt);
       applyBgToContainers();
 
       // Ad ogni render (apertura libro, cambio capitolo, resize) prepara
@@ -1676,8 +1687,45 @@
 
     // Content hook di epub.js: eseguito su OGNI render di capitolo, mantiene
     // il foglio di stile del tema attivo dentro il documento dell'iframe.
-    function injectBgTheme(contents) {
+    // Sillabazione automatica (hyphens:auto richiede lang sul documento
+    // del capitolo, che e' un iframe a se'). L'hook verifica PRIMA la lingua
+    // dell'EPUB (dc:language dell'OPF, letta in openBook dentro bookLang) e
+    // la propaga ai capitoli che ne sono privi. Supportate: it, en, fr, de.
+    // Se il capitolo ha gia' un lang esplicito valido viene rispettato.
+    var HYPHEN_LANGS = ["it", "en", "fr", "de"];
+    function bookTargetLang() {
+      var l = (bookLang || "").trim().toLowerCase().replace("_", "-");
+      var base = l.split("-")[0];
+      if (HYPHEN_LANGS.indexOf(base) >= 0) return base;
+      return null; // lingua assente o non supportata: nessun forcing
+    }
+    function injectHyphenIt(contents) {
       var doc = contents && contents.document;
+      if (!doc || !doc.documentElement) return;
+      var target = bookTargetLang();
+      if (!target) return;
+      var html = doc.documentElement;
+      var chapLang = (html.getAttribute("lang")
+        || html.getAttribute("xml:lang") || "").trim().toLowerCase().replace("_", "-");
+      var chapBase = chapLang.split("-")[0];
+      if (chapBase && HYPHEN_LANGS.indexOf(chapBase) >= 0) {
+        target = chapBase; // capitolo con lang propria valida: rispettala, applica solo il css
+      } else if (chapBase) {
+        return; // lang esplicita di altra lingua (es. es, es): non toccare
+      } else {
+        html.setAttribute("lang", target);
+        html.setAttribute("xml:lang", target);
+      }
+      if (doc.getElementById("app-hyphen-it")) return;
+      var st = doc.createElement("style");
+      st.id = "app-hyphen-it";
+      st.textContent = "body{font-family:serif;line-height:1.4;margin:0%;"
+        + "-webkit-hyphens:auto;-epub-hyphens:auto;hyphens:auto;"
+        + "text-align:justify;}";
+      (doc.head || html).appendChild(st);
+    }
+
+    function injectBgTheme(contents) {      var doc = contents && contents.document;
       if (!doc || !doc.head) return;
       var id = "app-bg-theme";
       var el = doc.getElementById(id);
