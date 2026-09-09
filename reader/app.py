@@ -285,6 +285,90 @@ def api_config():
     return jsonify(book_dir=BOOK_DIR)
 
 
+@app.route("/api/css_files")
+def api_css_files():
+    """Elenca i fogli di stile del pacchetto (cartella styles/).
+
+    ?book=ext → walk di BOOK_DIR per *.css (path relativi con /).
+    ?book=<nome.epub> → namelist dello zip filtrato per .css.
+    Risposta: {"ok": true, "files": [{"href":..., "size":...}]}.
+    bundle.css (virtuale) e' sempre escluso: si editano i singoli file.
+    """
+    book = request.args.get("book", "")
+    if not _valid_book_key(book):
+        return jsonify(ok=False, error="Nome libro non valido")
+    files = []
+    try:
+        if book.rstrip("/") == FOLDER_BOOK_KEY:
+            if not BOOK_DIR or not os.path.isdir(BOOK_DIR):
+                return jsonify(ok=False, error="Cartella esterna non configurata")
+            for dirpath, _d, filenames in os.walk(BOOK_DIR):
+                for fn in filenames:
+                    if not fn.lower().endswith(".css"):
+                        continue
+                    rel = os.path.relpath(os.path.join(dirpath, fn), BOOK_DIR)
+                    rel = rel.replace("\\", "/")
+                    if os.path.basename(rel).lower() == "bundle.css":
+                        continue
+                    try:
+                        size = os.path.getsize(os.path.join(dirpath, fn))
+                    except OSError:
+                        size = 0
+                    files.append({"href": rel, "size": size})
+        else:
+            m = re.match(r"^extepub:(\d+)$", book)
+            path = EPUB_FILES[int(m.group(1))] if m else os.path.join(STATIC_DIR, book)
+            with zipfile.ZipFile(path) as zf:
+                for info in zf.infolist():
+                    if info.filename.lower().endswith(".css") \
+                            and os.path.basename(info.filename).lower() != "bundle.css":
+                        files.append({"href": info.filename, "size": info.file_size})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc))
+    files.sort(key=lambda f: f["href"])
+    return jsonify(ok=True, files=files)
+
+
+@app.route("/api/css_content")
+def api_css_content():
+    """Contenuto testuale di un singolo .css (?book=<key>&href=<path>).
+    Cartella: lettura da disco; .epub: lettura dallo zip (match
+    case-insensitive come save_chapter). Risposta: {"ok":true,"content":...}.
+    Evita di passare per book.archive/JSZip lato client."""
+    book = request.args.get("book", "")
+    href = (request.args.get("href", "") or "").replace("\\", "/").lstrip("/")
+    if not _valid_book_key(book):
+        return jsonify(ok=False, error="Nome libro non valido")
+    if not href or ".." in href.split("/") or not href.lower().endswith(".css"):
+        return jsonify(ok=False, error="Href non valido: " + href)
+    try:
+        if book.rstrip("/") == FOLDER_BOOK_KEY:
+            if not BOOK_DIR or not os.path.isdir(BOOK_DIR):
+                return jsonify(ok=False, error="Cartella esterna non configurata")
+            target = resolve_in_dir(BOOK_DIR, href)
+            if target is None:
+                return jsonify(ok=False, error="File non trovato: " + href)
+            with open(target, "r", encoding="utf-8", errors="replace") as f:
+                return jsonify(ok=True, href=href, content=f.read())
+        m = re.match(r"^extepub:(\d+)$", book)
+        path = EPUB_FILES[int(m.group(1))] if m else os.path.join(STATIC_DIR, book)
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+            hit = next((n for n in names if n.lower() == href.lower()), None)
+            if hit is None:
+                return jsonify(ok=False,
+                               error="File non trovato: " + href
+                               + " (voci: " + str(len(names)) + ")")
+            raw = zf.read(hit)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+        return jsonify(ok=True, href=hit, content=text)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc))
+
+
 
 def _valid_book_key(book):
     """True se `book` e' una chiave libro valida (stessa regola di

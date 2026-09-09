@@ -564,6 +564,7 @@
       font-size: 14px;
     }
     #metaEditor.open { display: flex; }
+    #cssEditor.open { display: flex !important; }
     .metaHead {
       display: flex;
       align-items: center;
@@ -765,6 +766,7 @@
     <button id="spreadToggle" disabled title="Toggle single/double page view">📄</button>
     <button id="reloadBtn" disabled title="Reload current chapter from disk">🔄</button>
     <button id="metaEditBtn" disabled title="Edit EPUB metadata (folder books only)">⚙️</button>
+    <button id="cssEditBtn" disabled title="Modifica fogli di stile (styles/*.css)">🎨</button>
     <button id="searchToggle" disabled title="Search in current chapter" style="font-size:20px">🔎</button>
 
     <select id="widthSelect" title="Larghezza massima pagina">
@@ -825,6 +827,24 @@
       <span>&nbsp;&nbsp;</span>
     </div>
     <div id="ieGrip" title="Ridimensiona"></div>
+  </div>
+
+  <!-- Editor fogli di stile styles/*.css: riusa gli stili del metaEditor -->
+  <div id="cssEditor" aria-hidden="true" style="display:none;position:fixed;z-index:1100;top:50%;left:50%;transform:translate(-50%,-50%);width:680px;max-width:94vw;height:72vh;min-height:320px;flex-direction:column;background:#262626;border:1px solid #666;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.55);overflow:hidden;font-size:14px">
+    <div class="metaHead">
+      <span>Fogli di stile (styles/)</span>
+      <button id="cssClose" title="Chiudi (Esc)">✕</button>
+    </div>
+    <div style="display:flex;gap:8px;padding:8px 14px;background:#2f2f2f;border-bottom:1px solid #555;flex-shrink:0">
+      <select id="cssList" title="File CSS del pacchetto" style="flex:1;background:#222;color:#eee;border:1px solid #666;border-radius:4px;padding:6px;font-size:13px;min-width:0"></select>
+      <button id="cssReload" title="Ricarica dal disco" style="background:#555;color:#fff;border:none;border-radius:4px;padding:6px 10px;cursor:pointer">↻</button>
+    </div>
+    <textarea id="cssCode" spellcheck="false" wrap="off" placeholder="Seleziona un .css dalla lista…" style="flex:1;min-height:0;border:none;outline:none;resize:none;padding:12px;background:#1e1e1e;color:#dcdcdc;font-family:Consolas,monospace;font-size:13px;line-height:1.5;white-space:pre;overflow:auto"></textarea>
+    <div class="metaFoot">
+      <span id="cssPath" style="flex:1;font-size:11px;color:#888;overflow:hidden;white-space:nowrap;text-overflow:ellipsis"></span>
+      <button id="cssCancel">Annulla</button>
+      <button id="cssSave" style="background:#3d7a3d">💾 Salva</button>
+    </div>
   </div>
 
   <!-- Editor metadati OPF (libri da cartella) -->
@@ -1247,6 +1267,7 @@
     function openBook(url) {
       closeInlineEditor();
       closeMetaEditor();
+      try{ closeCssEditor(); }catch(e){}
       closeBuildReport();
       closeSearch(); // CRITICAL: clear search highlights before opening new book
       if (book) {
@@ -1270,6 +1291,7 @@
       if (isFolderBook()) installArchiveShim();
       document.getElementById("reloadBtn").disabled = !isFolderBook();
       document.getElementById("metaEditBtn").disabled = !isFolderBook();
+      document.getElementById("cssEditBtn").disabled = false;
       rendition = book.renderTo("viewer", {
         width: "100%",
         height: "100%",
@@ -1705,6 +1727,72 @@
     }
 
     document.getElementById("metaEditBtn").addEventListener("click", openMetaEditor);
+
+    // === Editor CSS styles/*.css: lista dal server, edit, save via apiSaveChapter ===
+    var cssEditor = document.getElementById("cssEditor");
+    var cssList = document.getElementById("cssList");
+    var cssCode = document.getElementById("cssCode");
+    var cssSave = document.getElementById("cssSave");
+    var cssPathEl = document.getElementById("cssPath");
+    function cssHref(){ return cssList.value || ""; }
+    function loadCssFile(href){
+      if(!href) return;
+      cssSave.disabled=true;
+      cssPathEl.textContent="Caricamento: "+href+"…";
+      // Lettura sempre dal backend: /api/css_content legge da disco (ext)
+      // o dallo zip (.epub), senza passare per JSZip/epub.js lato client.
+      fetch("/api/css_content?book="+encodeURIComponent(bookKey())+"&href="+encodeURIComponent(href))
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if(d&&d.ok){ cssCode.value=d.content; cssPathEl.textContent="Modifica: "+(d.href||href); cssSave.disabled=false; }
+          else setStatus("File non trovato: "+((d&&d.error)||href));
+        })
+        .catch(function(e){ setStatus("Errore CSS: "+(e&&e.message?e.message:e)); });
+    }
+    function openCssEditor(){
+      if(!currentBookUrl) return;
+      fetch("/api/css_files?book="+encodeURIComponent(bookKey()))
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if(!d||!d.ok){ setStatus("Nessun CSS: "+((d&&d.error)||"")); return; }
+          cssList.innerHTML="";
+          (d.files||[]).forEach(function(f){
+            var o=document.createElement("option"); o.value=f.href; o.textContent=f.href+" ("+f.size+" B)"; cssList.appendChild(o);
+          });
+          if(!cssList.options.length){ setStatus("Nessun .css nel pacchetto."); return; }
+          cssEditor.classList.add("open"); cssEditor.setAttribute("aria-hidden","false");
+          loadCssFile(cssHref());
+        }).catch(function(e){ setStatus("Errore lista CSS: "+e); });
+    }
+    function closeCssEditor(){ cssEditor.classList.remove("open"); cssEditor.setAttribute("aria-hidden","true"); }
+    document.getElementById("cssEditBtn").addEventListener("click", openCssEditor);
+    document.getElementById("cssClose").addEventListener("click", closeCssEditor);
+    document.getElementById("cssCancel").addEventListener("click", closeCssEditor);
+    cssList.addEventListener("change", function(){ loadCssFile(cssHref()); });
+    document.getElementById("cssReload").addEventListener("click", function(){ loadCssFile(cssHref()); });
+    cssSave.addEventListener("click", function(){
+      var href=cssHref(); if(!href) return; cssSave.disabled=true;
+      apiSaveChapter({book:bookKey(), href:href, content:cssCode.value}).then(function(res){
+        if(res&&res.ok){
+          setStatus("CSS salvato ✓ "+href);
+          if(isFolderBook()){
+          // live-reload cartella: il bundle.css viene rigenerato (max_mtime) → bust dei link
+          try{
+            var contents=rendition.getContents();
+            if(contents) contents.forEach(function(c){
+              if(!c||!c.document) return;
+              c.document.querySelectorAll('link[href*=\'bundle.css\']').forEach(function(l){
+                var h=l.getAttribute("href").split("?")[0]; l.setAttribute("href",h+"?t="+Date.now());
+              });
+            });
+          }catch(e){}
+          } else {
+            // .epub impacchettato: ricarica il capitolo per riapplicare il css dallo zip
+            try{ if(rendition&&currentHref) rendition.display(currentHref); }catch(e){}
+          }
+        } else { cssSave.disabled=false; setStatus("Errore salvataggio CSS: "+((res&&res.error)||"")); }
+      }).catch(function(e){ cssSave.disabled=false; setStatus("Errore server: "+e); });
+    });
 
     // ==================================================================
     // Ricerca nel testo del capitolo corrente
