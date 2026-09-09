@@ -79,7 +79,7 @@
     #title { flex: 1 0 80px; margin-left:2rem;text-align: left; font-weight: 600; overflow: hidden;
              white-space: nowrap; text-overflow: ellipsis; }
     #chapter { font-size: 12px; color: #aaa; }
-    #filesToggle.active { background: #777; }
+    #filesToggle.active, #tocToggle.active { background: #777; }
 
     /* Bottoni tema di lettura: sfondo del testo */
     #toolbar #bgYellowBtn { background: #fff9c4; color: #333; }
@@ -90,7 +90,7 @@
     #toolbar #bgBlackBtn.active { outline: 2px solid #fff; outline-offset: -1px; }
 
     /* Sidebar condivisa (stile) */
-    #sidebar, #librarySidebar {
+    #sidebar, #librarySidebar, #tocSidebar {
       position: fixed;
       top: 48px;
       left: 0;
@@ -107,7 +107,7 @@
       z-index: 20;
       overflow: hidden;
     }
-    #sidebar.open, #librarySidebar.open { transform: translateX(0); }
+    #sidebar.open, #librarySidebar.open, #tocSidebar.open { transform: translateX(0); }
 
     #sidebarHeader {
       display: flex;
@@ -119,7 +119,7 @@
       flex-shrink: 0;
     }
     #sidebarHeader span { flex: 1; }
-    #sidebarClose, #libraryClose {
+    #sidebarClose, #libraryClose, #tocClose {
       background: none;
       border: none;
       color: #ccc;
@@ -127,7 +127,7 @@
       cursor: pointer;
       padding: 0 4px;
     }
-    #sidebarClose:hover, #libraryClose:hover { color: #fff; }
+    #sidebarClose:hover, #libraryClose:hover, #tocClose:hover { color: #fff; }
 
     /* Libreria */
     #bookList {
@@ -170,6 +170,26 @@
     }
     .bookItem.active .bookSize { color: #dce6f5; }
 
+    /* Indice TOC dell'EPUB */
+    #tocList {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+      touch-action: pan-y;
+    }
+    .tocItem {
+      padding: 7px 8px;
+      border-radius: 4px;
+      font-size: 13px;
+      cursor: pointer;
+      color: #ddd;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .tocItem:hover { background: #444; }
+    .tocItem.active { background: #5a7fb0; color: #fff; }
+    .tocEmpty { color: #999; font-size: 13px; padding: 8px; }
     /* Browser del pacchetto EPUB */
     #fileList {
       flex: 1;
@@ -752,6 +772,7 @@
   <div id="toolbar">
     <button id="libraryToggle" title="Libreria">📚</button>
     <button id="filesToggle" title="File inclusi nell'EPUB">📂</button>
+    <button id="tocToggle" title="Indice dei capitoli (TOC)" disabled>☰</button>
     <button id="prev" title="Pagina precedente" disabled style="width:4rem;font-size:1.2rem">‹</button>
     <button id="next" title="Pagina successiva" disabled style="width:4rem;font-size:1.2rem">›</button>
       <button id="tabView" class="tab active">📖</button>
@@ -880,6 +901,15 @@
     <div id="bookList"></div>
   </aside>
 
+  <!-- Sidebar sinistra: indice TOC dell'EPUB -->
+  <aside id="tocSidebar" aria-hidden="true">
+    <div id="sidebarHeader">
+      <span>Indice dei capitoli</span>
+      <button id="tocClose" title="Chiudi">✕</button>
+    </div>
+    <div id="tocList"></div>
+  </aside>
+
   <!-- Sidebar sinistra: file del pacchetto EPUB -->
   <aside id="sidebar" aria-hidden="true">
     <div id="sidebarHeader">
@@ -951,9 +981,11 @@
     function openLibrary() {
       librarySidebar.classList.add("open");
       document.getElementById("libraryToggle").classList.add("active");
-      // aprendo la libreria chiudi l'eventuale browser dei file
+      // aprendo la libreria chiudi le altre sidebar
       document.getElementById("sidebar").classList.remove("open");
       document.getElementById("filesToggle").classList.remove("active");
+      document.getElementById("tocSidebar").classList.remove("open");
+      document.getElementById("tocToggle").classList.remove("active");
     }
     function closeLibrary() {
       librarySidebar.classList.remove("open");
@@ -1390,6 +1422,7 @@
         document.getElementById("next").disabled = false;
         document.getElementById("spreadToggle").disabled = false;
         document.getElementById("filesToggle").disabled = false;
+        document.getElementById("tocToggle").disabled = false;
         document.getElementById("tabEdit").disabled = false;
         document.getElementById("zoomOut").disabled = false;
         document.getElementById("zoomReset").disabled = false;
@@ -1404,6 +1437,18 @@
         } catch (err) {
           document.getElementById("fileList").textContent =
             "Errore: " + err.message;
+        }
+        try {
+          buildTocList();
+        } catch (err) {
+          document.getElementById("tocList").textContent =
+            "Errore: " + err.message;
+        }
+        // Il TOC arriva in modo asincrono: riprova quando navigation e' pronta
+        if (book && book.loaded && book.loaded.navigation) {
+          book.loaded.navigation.then(function () {
+            try { buildTocList(); } catch (e) {}
+          });
         }
         highlightCurrentBook();
 
@@ -1447,6 +1492,7 @@
           fileEls[location.start.href].classList.add("active");
           fileEls[location.start.href].scrollIntoView({ block: "nearest" });
         }
+        try { highlightTocItem(); } catch (e) {}
         // Stato pulsanti: disabilita ai bordi del libro (prev all'inizio,
         // next alla fine) così il click non "sembra" rotto.
         document.getElementById("prev").disabled = !!location.atStart;
@@ -2220,8 +2266,69 @@
         sb.classList.add("open");
         this.classList.add("active");
         closeLibrary(); // aprendo i file chiudi la libreria
+        document.getElementById("tocSidebar").classList.remove("open");
+        document.getElementById("tocToggle").classList.remove("active");
       }
     });
+    document.getElementById("tocToggle").addEventListener("click", function () {
+      var sb = document.getElementById("tocSidebar");
+      if (sb.classList.contains("open")) {
+        sb.classList.remove("open");
+        this.classList.remove("active");
+      } else {
+        sb.classList.add("open");
+        this.classList.add("active");
+        closeLibrary();
+        document.getElementById("sidebar").classList.remove("open");
+        document.getElementById("filesToggle").classList.remove("active");
+      }
+    });
+    document.getElementById("tocClose").addEventListener("click", function () {
+      document.getElementById("tocSidebar").classList.remove("open");
+      document.getElementById("tocToggle").classList.remove("active");
+    });
+
+    // Vista indice TOC: usa book.navigation.toc (NCX/nav), gerarchico.
+    // Click su una voce -> rendition.display(href) come la sidebar file.
+    function buildTocList() {
+      var list = document.getElementById("tocList");
+      list.innerHTML = "";
+      var toc = (book && book.navigation && book.navigation.toc) || [];
+      if (!toc.length) {
+        var empty = document.createElement("div");
+        empty.className = "tocEmpty";
+        empty.textContent = "Nessun indice TOC in questo EPUB.";
+        list.appendChild(empty);
+        return;
+      }
+      (function addItems(items, depth) {
+        items.forEach(function (it) {
+          var row = document.createElement("div");
+          row.className = "tocItem";
+          row.textContent = it.label || it.href || "(senza titolo)";
+          row.title = it.href || "";
+          row.style.paddingLeft = (8 + depth * 16) + "px";
+          row.dataset.tocHref = it.href || "";
+          row.addEventListener("click", (function (href) {
+            return function () { if (rendition && href) rendition.display(href); };
+          })(it.href));
+          list.appendChild(row);
+          if (it.subitems && it.subitems.length) addItems(it.subitems, depth + 1);
+        });
+      })(toc, 0);
+      highlightTocItem();
+    }
+    // Evidenzia la voce TOC del capitolo corrente (confronto su href base)
+    function highlightTocItem() {
+      var rows = document.querySelectorAll("#tocList .tocItem");
+      var cur = (currentHref || "").split("#")[0].split("?")[0];
+      for (var i = 0; i < rows.length; i++) {
+        var h = (rows[i].dataset.tocHref || "").split("#")[0].split("?")[0];
+        // l'href TOC puo' essere relativo al package: confronta anche il suffisso
+        var match = h && cur && (h === cur || cur.slice(-h.length) === h || h.slice(-cur.length) === cur);
+        rows[i].classList.toggle("active", !!match);
+      }
+    }
     document.getElementById("sidebarClose").addEventListener("click", function () {
       document.getElementById("sidebar").classList.remove("open");
       document.getElementById("filesToggle").classList.remove("active");
@@ -2406,6 +2513,8 @@
         closeLibrary();
         document.getElementById("sidebar").classList.remove("open");
         document.getElementById("filesToggle").classList.remove("active");
+        document.getElementById("tocSidebar").classList.remove("open");
+        document.getElementById("tocToggle").classList.remove("active");
       }
     });
 
