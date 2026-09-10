@@ -288,7 +288,12 @@
       background: #fafafa;
       box-shadow: 0 0 30px rgba(0,0,0,.5);
       overflow: hidden;
-      touch-action: none;
+      /* ATTENZIONE — swipe dx->sx che a volte fa uscire dall'app:
+         NON tentare preventDefault/touchmove non-passive, edge-guard o
+         touch-action:pan-y qui: testato, rompe handleSwipe (niente touchend,
+         pagina che non gira) e/o peggiora il back-gesture. Solo CSS sopra. */
+      touch-action: none; /* originale: non toccare */
+      overscroll-behavior: none; overscroll-behavior-x: none; /* anti back-gesture, non cancella eventi */
     }
 
     /* Editor HTML */
@@ -349,8 +354,11 @@
       overflow: auto;
     }
 
+    /* ATTENZIONE — vedi nota swipe sopra #viewer: niente preventDefault/
+       edge-guard qui, rompono lo swipe. Solo CSS. */
     .epub-container {
-      touch-action: none;
+      touch-action: none; /* originale: non toccare */
+      overscroll-behavior: none; overscroll-behavior-x: none;
       box-sizing: border-box;
       padding: 3% 3%; /* margine attorno all'area di lettura; epub.js sottrae il padding del container dalla size */
     }
@@ -1727,7 +1735,13 @@
       st.id = "app-hyphen-it";
       st.textContent = "body{font-family:serif;line-height:1.4;margin:0%;"
         + "-webkit-hyphens:auto;-epub-hyphens:auto;hyphens:auto;"
-        + "text-align:justify;}";
+        + "text-align:justify;}"
+        + "html,body{overscroll-behavior:none !important;overscroll-behavior-x:none !important;"
+        + "touch-action:none !important;}"; /* ATTENZIONE swipe dx->sx: NON aggiungere
+           listener touchmove/preventDefault dentro l'iframe e NON passare a pan-y:
+           testato il XX/XX — il preventDefault cancella il touchend di handleSwipe
+           (pagina che non gira) e pan-y riconsegna lo swipe al back-gesture
+           (uscite sempre). Solo questa riga CSS. */
       (doc.head || html).appendChild(st);
     }
 
