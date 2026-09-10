@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
@@ -336,7 +337,7 @@ def api_css_content():
     case-insensitive come save_chapter). Risposta: {"ok":true,"content":...}.
     Evita di passare per book.archive/JSZip lato client."""
     book = request.args.get("book", "")
-    href = (request.args.get("href", "") or "").replace("\\", "/").lstrip("/")
+    href = urllib.parse.unquote((request.args.get("href", "") or "")).replace("\\", "/").lstrip("/")
     if not _valid_book_key(book):
         return jsonify(ok=False, error="Nome libro non valido")
     if not href or ".." in href.split("/") or not href.lower().endswith(".css"):
@@ -526,7 +527,7 @@ def save_chapter():
         return jsonify(ok=False, error="Richiesta JSON non valida"), 400
 
     book_name = data.get("book", "")
-    href = data.get("href", "")
+    href = urllib.parse.unquote(str(data.get("href", "") or ""))
     content = data.get("content", "")
     # "silent" (opzionale): salvataggio in-context dal popover del viewer.
     # In Flask il ri-render è sempre lato client, quindi il flag non ha
@@ -688,7 +689,7 @@ def resolve_in_dir(root, href):
     """Ritorna il path reale di `href` sotto `root`, con match case-insensitive
     (come cmpIgnoreCase usato per le voci dello zip). Ritorna None se assente
     o se il path risolto esce da `root` (sicurezza: niente traversal)."""
-    href = href.replace("\\", "/").lstrip("/")
+    href = urllib.parse.unquote(href.replace("\\", "/")).lstrip("/")
     direct = os.path.join(root, href)
     if os.path.isfile(direct):
         return _contained_realpath(root, direct)

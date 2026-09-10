@@ -1223,6 +1223,14 @@
 
     // Percorso della voce dentro l'epub (zip: voce dell'archivio; cartella:
     // percorso relativo alla radice del pacchetto, senza il prefisso /ext/).
+    // NOTA (bug noto, da risolvere in futuro): se un file interno all'epub
+    // ha SPAZI nel nome (es. "Text/ch05bRealismo della forza.xhtml"), il
+    // salvataggio smette di funzionare per quel capitolo. Il manifest OPF
+    // riporta l'href percent-encoded ("...Realismo%20della%20...") mentre la
+    // voce reale nello zip contiene spazi letterali: l'href inviato a
+    // /api/save_chapter non matcha piu' la namelist e il server risponde
+    // "non e' presente nell'epub". Workaround attuale: rinominare i file
+    // senza spazi (e aggiornare di conseguenza il manifest OPF).
     function chapterArchPath(section, href) {
       return normalizeExtPath((section && section.url) || href);
     }
