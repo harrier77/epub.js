@@ -2918,6 +2918,19 @@
         if (!el) { closeInlineEditor(); return; }
         openInlineEditor(contents, el, e, false);            // prepara senza mostrare
       });
+      // Doppio click (solo desktop/mouse): apre subito il popover in
+      // modalita' "Intero" (tutto il paragrafo HTML), ignorando frammento
+      // e selezione. Il touch resta invariato (tap + bottone 🔠).
+      doc.addEventListener("dblclick", function (e) {
+        if (e.button && e.button !== 0) return;
+        if (inlineEditor.classList.contains("open")) return;
+        var t = e.target;
+        if (t && t.closest && t.closest("a")) return;
+        var el = t ? inlineBlockFrom(t) : null;
+        if (!el) return;
+        openInlineEditor(contents, el, e, true);
+        setInlineMode("full");
+      });
     }
 
     // Prepara (o mostra, se show !== false) l'editor in-context sul blocco
