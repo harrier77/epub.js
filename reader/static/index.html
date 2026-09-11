@@ -815,6 +815,7 @@
     <button id="metaEditBtn" disabled title="Edit EPUB metadata (folder books only)">⚙️</button>
     <button id="cssEditBtn" disabled title="Modifica fogli di stile (styles/*.css)">🎨</button>
     <button id="searchToggle" disabled title="Search in current chapter" style="font-size:20px">🔎</button>
+    <button id="spellToolbar" disabled title="Controllo ortografico del paragrafo selezionato (come doppio click: apre il paragrafo intero e sottolinea gli errori)">✓</button>
 
     <select id="widthSelect" title="Larghezza massima pagina">
     <option value="30">30%</option>
@@ -861,7 +862,8 @@
        <button id="ieModeFrag" class="ieModeBtn" title="Modifica solo il frammento di testo cliccato">Frammento</button>
        <button id="ieModeFull" class="ieModeBtn" title="Modifica l'intero paragrafo (HTML)">Intero</button>
        <button id="ieMergePrev" class="ieModeBtn" title="Unisce questo paragrafo al precedente: il tag/contenitore del precedente viene conservato, tutto il contenuto inline (em, strong, a, …) di entrambi viene preservato, tra i due viene inserito un singolo spazio">⤺ Unisci al prec.</button>
-       <button id="ieSave">💾 Salva</button>
+        <button id="ieSpell" class="ieModeBtn" title="Controllo ortografico del paragrafo (it_IT): sottolinea le parole non nel dizionario">✓</button>
+        <button id="ieSave">💾 Salva</button>
        <button id="ieCancel">Annulla</button>
       <button id="ieClose" title="Chiudi (Esc)">✕</button>
     </div>
@@ -1389,6 +1391,7 @@
         if (contents) contents.forEach(function (c) {
           if (c && c.document) {
             bindInlineEdit(c); // prepara il popover in-context al click (invisibile)
+            injectSpellStyles(c.document); // sottolineatura ortografica ✓
             injectSearchStyles(c.document); // stili highlight ricerca
           }
         });
@@ -1478,6 +1481,7 @@
         document.getElementById("bgYellowBtn").disabled = false;
         document.getElementById("bgBlackBtn").disabled = false;
         document.getElementById("searchToggle").disabled = false;
+        document.getElementById("spellToolbar").disabled = false;
         var title = book.packaging.metadata.title;
         if (title) document.getElementById("title").textContent = title;
         try {
@@ -2042,6 +2046,7 @@
     // And the search must be RE-APPLIED AFTER these operations complete.
     // ======================================================================
     function clearSearchHighlights() {
+      clearSpellMarks(); // le sottolineature ortografiche seguono lo stesso ciclo vita (CFI-safe)
       searchHighlights.forEach(function (mark) {
         if (mark && mark.parentNode) {
           // Replace <mark> with its text content, then normalize merges
@@ -2293,11 +2298,157 @@
       if (doc.getElementById("search-styles")) return; // already injected
       var style = doc.createElement("style");
       style.id = "search-styles";
-      style.textContent = 
+      style.textContent =
         "mark.search-highlight { background: #ffeb3b; color: #000; padding: 1px 2px; }" +
         "mark.search-highlight.active { background: #ff9800; outline: 2px solid #f57f17; }";
       doc.head.appendChild(style);
     }
+
+    // ==================================================================
+    // Controllo ortografico (solo paragrafo selezionato, solo temporaneo)
+    // Il bottone ✓ nel popover chiede a POST /api/spellcheck le parole
+    // errate e le avvolge in <span class="spell-error"> nel DOM live
+    // dell'iframe (sottolineatura wavy rossa). Come i <mark> di ricerca,
+    // gli span vanno RIMOSSI (clearSpellMarks + normalize) prima di ogni
+    // display/resize/save/close per non invalidare i CFI di epub.js e per
+    // non finire mai nel capitolo salvato.
+    // ==================================================================
+    var spellMarks = []; // span.spell-error inseriti nel paragrafo
+    function injectSpellStyles(doc) {
+      if (!doc || !doc.head) return;
+      if (doc.getElementById("spell-styles")) return;
+      var style = doc.createElement("style");
+      style.id = "spell-styles";
+      style.textContent =
+        "span.spell-error { text-decoration: underline wavy red 1.5px; " +
+        "text-decoration-skip-ink: none; cursor: pointer; }";
+      doc.head.appendChild(style);
+    }
+    function clearSpellMarks() {
+      spellMarks.forEach(function (sp) {
+        if (sp && sp.parentNode) {
+          var parent = sp.parentNode;
+          parent.replaceChild(parent.ownerDocument.createTextNode(sp.textContent), sp);
+          parent.normalize();
+        }
+      });
+      spellMarks = [];
+    }
+    function markSpellErrors(doc, element, badWords) {
+      var set = {};
+      badWords.forEach(function (w) { set[String(w).toLowerCase()] = 1; });
+      var walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
+        acceptNode: function (n) {
+          var tag = n.parentNode && ((n.parentNode.localName || n.parentNode.tagName || "") + "").toLowerCase();
+          if (tag === "script" || tag === "style") return NodeFilter.FILTER_REJECT;
+          if (tag === "span" && n.parentNode.className === "spell-error") return NodeFilter.FILTER_REJECT;
+          return n.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+      });
+      var nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      var re = /[A-Za-zÀ-ÖØ-öø-ÿ']+/g;
+      nodes.forEach(function (node) {
+        var text = node.nodeValue, m, last = 0, parts = [], hits = [];
+        re.lastIndex = 0;
+        while ((m = re.exec(text)) !== null) {
+          if (set[m[0].toLowerCase()]) {
+            if (m.index > last) parts.push(doc.createTextNode(text.slice(last, m.index)));
+            var sp = doc.createElement("span");
+            sp.className = "spell-error";
+            sp.textContent = m[0];
+            // Click sulla parola = accettala (va in accepted.txt, non piu'
+            // segnalata). stopPropagation: il click non deve raggiungere
+            // l'handler di editing in-context del documento.
+            sp.title = "Click per accettare «" + m[0] + "»";
+            (function (word, el) {
+              el.addEventListener("click", function (e) {
+                e.stopPropagation();
+                acceptSpellWord(word);
+              });
+            })(m[0], sp);
+            parts.push(sp);
+            hits.push(sp);
+            last = m.index + m[0].length;
+          }
+        }
+        if (!hits.length) return;
+        if (last < text.length) parts.push(doc.createTextNode(text.slice(last)));
+        var parent = node.parentNode;
+        parts.forEach(function (p) { parent.insertBefore(p, node); });
+        parent.removeChild(node);
+        hits.forEach(function (h) { spellMarks.push(h); });
+      });
+    }
+    // Accetta una parola: la salva in accepted.txt e rimuove subito tutte
+    // le sue sottolineature nel paragrafo (confronto case-insensitive).
+    function acceptSpellWord(word) {
+      var key = String(word || "").toLowerCase();
+      if (!key) return;
+      fetch("/api/spellcheck/accept", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ word: key })
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d || !d.ok) { setStatus("Errore: " + ((d && d.error) || "")); return; }
+        var kept = [];
+        spellMarks.forEach(function (sp) {
+          if (sp && sp.parentNode && String(sp.textContent || "").toLowerCase() === key) {
+            var parent = sp.parentNode;
+            parent.replaceChild(parent.ownerDocument.createTextNode(sp.textContent), sp);
+            parent.normalize();
+          } else if (sp && sp.parentNode) {
+            kept.push(sp);
+          }
+        });
+        spellMarks = kept;
+        setStatus("«" + key + "» accettata ✓");
+      }).catch(function (e) { setStatus("Errore server: " + e); });
+    }
+    function runSpellcheck(btn) {      if (!inlineCtx || !inlineCtx.element || !inlineCtx.doc) {
+        setStatus("Clicca prima su un paragrafo nel libro.");
+        return;
+      }
+      // Toggle: se ci sono marcature, rimuovile soltanto
+      if (spellMarks.length) { clearSpellMarks(); setStatus(""); return; }
+      btn.disabled = true;
+      setStatus("Controllo ortografico…");
+      var text = "";
+      try { text = inlineCtx.element.textContent || ""; } catch (e) {}
+      fetch("/api/spellcheck", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text })
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        btn.disabled = false;
+        if (!d || !d.ok) { setStatus("Errore ortografico: " + ((d && d.error) || "")); return; }
+        clearSpellMarks();
+        if (!d.misspelled || !d.misspelled.length) { setStatus("Nessun errore ✓"); return; }
+        injectSpellStyles(inlineCtx.doc);
+        markSpellErrors(inlineCtx.doc, inlineCtx.element, d.misspelled);
+        setStatus(d.misspelled.length + " parole da rivedere");
+      }).catch(function (e) {
+        btn.disabled = false;
+        setStatus("Errore server: " + e);
+      });
+    }
+    document.getElementById("ieSpell").addEventListener("click", function () { runSpellcheck(this); });
+    // Toolbar ✓: opera sul paragrafo selezionato come il doppio click —
+    // apre il popover in modalita' "Intero" sullo stesso inlineCtx e lancia
+    // il controllo ortografico. Senza paragrafo cliccato, stesso avviso di 🔠.
+    document.getElementById("spellToolbar").addEventListener("click", function () {
+      if (!inlineCtx || !inlineCtx.element) {
+        setStatus("Clicca prima su un paragrafo nel libro, poi ripremi questo bottone.");
+        return;
+      }
+      setInlineMode("full");
+      inlineEditor.setAttribute("aria-hidden", "false");
+      inlineEditor.classList.add("open");
+      var w = inlineEditor.offsetWidth || 380;
+      inlineEditor.style.left = Math.max(8, (window.innerWidth - w) / 2) + "px";
+      inlineEditor.style.top = "60px";
+      runSpellcheck(document.getElementById("ieSpell"));
+    });
 
     // ==================================================================
     // Costruzione EPUB da cartella (port di build_epub.py)
@@ -3580,6 +3731,7 @@
     }
 
     function closeInlineEditor() {
+      clearSpellMarks(); // marcature ortografiche solo temporanee: mai salvate
       inlineEditor.classList.remove("open");
       inlineEditor.setAttribute("aria-hidden", "true");
       if (ieFrags.contains(document.activeElement)) document.activeElement.blur();
@@ -3749,6 +3901,9 @@
       var ctx = inlineCtx;
       // Modalita' frammento: applica l'edit al SUO nodo testo e riserializza
       // il paragrafo dal DOM live (tag e attributi restano intatti).
+      // Le sottolineature ortografiche sono solo temporanee: rimosse prima
+      // di serializzare, cosi' non finiscono mai nel capitolo salvato.
+      clearSpellMarks();
       if (ctx.mode !== "full" && ctx.textNodes && ctx.textNodes.length) {
         // Markup invalido nel frammento: blocca il salvataggio, nulla è
         // stato scritto nel DOM live.

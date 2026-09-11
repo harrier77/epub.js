@@ -279,6 +279,102 @@ def health():
     return jsonify(status="ok")
 
 
+# --- Controllo ortografico (hunspell it_IT, solo temporaneo nel DOM) ---
+HUNSPELL_DIR = os.path.join(BASE_DIR, "hunspell_dictionaries")
+# NOTA: it_IT.aff NON e' una lista di parole ma il file delle regole di
+# flessione hunspell: non va modificato. Le parole accettate dall'utente
+# vivono in accepted.txt (una per riga), caricato in aggiunta al dizionario.
+ACCEPTED_FILE = os.path.join(HUNSPELL_DIR, "accepted.txt")
+_spell_dict = None
+_accepted_cache = None  # (mtime, set di parole minuscole)
+
+
+def _get_spell_dict():
+    """Carica (una sola volta) it_IT.dic/.aff via spylls (puro Python)."""
+    global _spell_dict
+    if _spell_dict is None:
+        from spylls.hunspell import Dictionary
+        base = os.path.join(HUNSPELL_DIR, "it_IT")
+        _spell_dict = Dictionary.from_files(base)
+    return _spell_dict
+
+
+def _get_accepted():
+    """Parole accettate dall'utente (accepted.txt). Ricarica se modificato."""
+    global _accepted_cache
+    try:
+        mtime = os.path.getmtime(ACCEPTED_FILE)
+    except OSError:
+        return set()
+    if _accepted_cache and _accepted_cache[0] == mtime:
+        return _accepted_cache[1]
+    words = set()
+    try:
+        with open(ACCEPTED_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                w = line.strip().lower()
+                if w and not w.startswith("#"):
+                    words.add(w)
+    except OSError:
+        pass
+    _accepted_cache = (mtime, words)
+    return words
+
+
+@app.route("/api/spellcheck", methods=["POST"])
+def api_spellcheck():
+    """Controlla le parole di un paragrafo. Solo visualizzazione temporanea.
+
+    Richiesta JSON: {"text": "..."}. Risposta:
+    {"ok": true, "misspelled": ["parola", ...]} (forme originali, dedup).
+    Le parole in accepted.txt sono sempre considerate corrette.
+    """
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", ""))[:20000]
+    try:
+        d = _get_spell_dict()
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error="Dizionario non disponibile: " + str(exc))
+    accepted = _get_accepted()
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ']+", text)
+    seen = set()
+    bad = []
+    for w in words:
+        if len(w) < 2 or w.isdigit() or "_" in w:
+            continue
+        key = w.lower()
+        if key in seen or key in accepted:
+            continue
+        seen.add(key)
+        # prova forma originale, minuscola e maiuscola (inizi frase)
+        if d.lookup(w) or d.lookup(key) or d.lookup(w.capitalize()):
+            continue
+        bad.append(w)
+    return jsonify(ok=True, misspelled=bad)
+
+
+@app.route("/api/spellcheck/accept", methods=["POST"])
+def api_spellcheck_accept():
+    """Aggiunge una parola ad accepted.txt (minuscola, senza duplicati).
+
+    Richiesta JSON: {"word": "..."}. Risposta: {"ok": true, "word": "..."}.
+    """
+    data = request.get_json(silent=True) or {}
+    word = str(data.get("word", "")).strip().lower()[:40]
+    if not re.fullmatch(r"[a-zà-öø-ÿ']+", word) or len(word) < 2:
+        return jsonify(ok=False, error="Parola non valida: " + word)
+    accepted = _get_accepted()
+    if word not in accepted:
+        try:
+            with open(ACCEPTED_FILE, "a", encoding="utf-8") as f:
+                f.write(word + "\n")
+        except OSError as exc:
+            return jsonify(ok=False, error="Scrittura fallita: " + str(exc))
+        global _accepted_cache
+        _accepted_cache = None  # forza ricarica alla prossima richiesta
+    return jsonify(ok=True, word=word)
+
+
 @app.route("/api/config")
 def api_config():
     """Espone la configurazione corrente al frontend (es. il percorso
