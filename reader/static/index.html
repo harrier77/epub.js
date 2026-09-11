@@ -2622,6 +2622,19 @@
     // --- Padding / colonne: lasciate interamente a epub.js (vedi openBook) ---
 
     // Tastiera: frecce per navigare, Esc per chiudere le sidebar / popover
+    // CTRL+I ITALIC WRAP (HTML editors only): wraps the current selection
+    // in <i></i> inside #codeEditor (full chapter) and #ieCode (popover
+    // "Full" HTML mode). Plain-text .ieFrag fields, #metaCode and other
+    // inputs are intentionally excluded so no literal tags leak into text
+    // nodes. Uses setRangeText (undo-friendly) + "input" event so the
+    // save button enables. Covers IT layout (key "\u00ec") and Shift variant.
+    function wrapItalic(ta) {
+      var s = ta.selectionStart, e = ta.selectionEnd;
+      var sel = ta.value.slice(s, e) || "";
+      ta.setRangeText("<i>" + sel + "</i>", s, e, "end");
+      if (!sel) ta.setSelectionRange(s + 3, s + 3); // empty sel: caret inside tags
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+    }
     document.addEventListener("keydown", function (e) {
       // Dentro gli editor (full-chapter o popover in-context) le frecce
       // muovono il cursore, non sfogliano
@@ -2630,6 +2643,15 @@
       var isEditor = isFrag ||
         (t && (t.id === "codeEditor" || t.id === "ieCode" || t.id === "metaCode"));
       if (isEditor) {
+        if (e.ctrlKey && !e.altKey && !e.metaKey &&
+            (e.key === "i" || e.key === "I" || e.key === "\u00ec" || e.key === "\u00cc")) {
+          if (t.id === "codeEditor" || t.id === "ieCode") {
+            e.preventDefault();
+            e.stopPropagation();
+            wrapItalic(t);
+          }
+          return;
+        }
         if (e.key === "Escape") {
           if (isFrag || t.id === "ieCode") closeInlineEditor();
           else if (t.id === "metaCode") closeMetaEditor();
@@ -2901,7 +2923,55 @@
     // interferisce con la selezione del testo.
     function bindInlineEdit(contents) {
       var doc = contents && contents.document;
-      if (!doc || inlineBoundDocs.has(doc)) return;
+      if (!doc) return;
+      // CTRL+I listener uses its own flag so chapters bound before this
+      // feature was added still get it on the next relocated/render pass.
+      if (!doc.__italicBound) {
+        doc.__italicBound = true;
+        doc.addEventListener("keydown", function (e) {
+          try {
+            if (!e.ctrlKey || e.altKey || e.metaKey) return;
+            var k = e.key || "";
+            if (k !== "i" && k !== "I" && k !== "\u00ec" && k !== "\u00cc") return;
+            if (inlineEditor.classList.contains("open")) return;
+            var sel = doc.getSelection ? doc.getSelection() : null;
+            if (!sel || !sel.rangeCount || sel.isCollapsed) return;
+            var rng = sel.getRangeAt(0);
+            var anchor = rng.commonAncestorContainer || rng.startContainer;
+            var el = inlineBlockFrom(anchor);
+            if (!el) return;
+            e.preventDefault();
+            e.stopPropagation();
+            openInlineEditor(contents, el, null, true);
+            if (!inlineCtx || !inlineCtx.selSpan) return;
+            // Force frag mode + visible popover: openInlineEditor may fall
+            // back to "full" when textNodes is empty; the italic preview
+            // only makes sense on the exact selected span.
+            setInlineMode("frag");
+            if (inlineCtx.mode !== "frag") return;
+            inlineEditor.setAttribute("aria-hidden", "false");
+            inlineEditor.classList.add("open");
+            ieFrags.style.display = "flex";
+            ieCode.style.display = "none";
+            ieSave.disabled = false;
+            var ta = ieFrags.querySelector("textarea.ieFrag");
+            if (!ta) return;
+            // NOTE: do NOT apply to the live DOM here. ieSave already calls
+            // applyFragField() once: a second apply would write into the
+            // detached span node, replaceTextNodeWithMarkup would fail
+            // (null parent) and the save handler would abort. Just stage
+            // the wrapped text in the field; Save performs the single apply.
+            var wrapped = "<i>" + currentSpanText(inlineCtx.selSpan) + "</i>";
+            ta.value = wrapped;
+            var idx = ta.parentNode ? ta.parentNode.querySelector(".fragIdx") : null;
+            if (idx) idx.textContent = "sel \u00b7 " + wrapped.length + " car.";
+            positionInlineEditor(inlineCtx.px, inlineCtx.py);
+            focusInlineField();
+            autoGrowVisibleFrags();
+          } catch (err) {}
+        });
+      }
+      if (inlineBoundDocs.has(doc)) return;
       inlineBoundDocs.add(doc);
       // Su mobile la selezione viene collassata PRIMA dell'evento click (e il
       // menu nativo Copia/Cerca/Traduci puo' intercettare il gesto): salviamo
