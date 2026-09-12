@@ -550,6 +550,214 @@ def save_position():
     return jsonify(ok=True)
 
 
+def _note_file_for_book(book):
+    """Path del file *.note.jsonl a fianco dell'epub/cartella (o None se chiave non valida)."""
+    if not _valid_book_key(book):
+        return None
+    if book.rstrip("/") == FOLDER_BOOK_KEY:
+        if not BOOK_DIR:
+            return None
+        base = os.path.normpath(BOOK_DIR).rstrip(os.sep)
+        return base + ".note.jsonl"
+    m = re.match(r"^extepub:(\d+)$", book)
+    if m:
+        idx = int(m.group(1))
+        if not EPUB_FILES or idx < 0 or idx >= len(EPUB_FILES):
+            return None
+        return EPUB_FILES[idx] + ".note.jsonl"
+    return os.path.join(STATIC_DIR, book + ".note.jsonl")
+
+
+@app.route("/api/save_note", methods=["POST"])
+def save_note():
+    """Appende una evidenziazione al file *.note.jsonl a fianco dell'epub.
+
+    Richiesta JSON: {"book": <book_key>, "cfi": "epubcfi(...)",
+                     "href": "OEBPS/cap.xhtml", "text": "...selezione..."}
+    Risposta: {"ok": true} oppure {"ok": false, "error": "..."}
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify(ok=False, error="Richiesta JSON non valida"), 400
+    book = str(data.get("book", ""))
+    cfi = str(data.get("cfi", ""))[:2000]
+    href = str(data.get("href", ""))[:500]
+    text = str(data.get("text", ""))[:2000]
+    if not cfi:
+        return jsonify(ok=False, error="CFI mancante"), 400
+    path = _note_file_for_book(book)
+    if path is None:
+        return jsonify(ok=False, error="Nome libro non valido: " + book)
+    entry = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "book": book,
+        "href": href,
+        "cfi": cfi,
+        "text": text,
+    }
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error="Errore durante la scrittura: " + str(exc))
+    return jsonify(ok=True)
+
+
+@app.route("/api/get_notes")
+def get_notes():
+    """Ritorna le note salvate per un libro. Query: ?book=<book_key>."""
+    book = request.args.get("book", "")
+    path = _note_file_for_book(book)
+    if path is None:
+        return jsonify(ok=False, error="Nome libro non valido")
+    notes = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    notes.append(json.loads(line))
+                except Exception:  # noqa: BLE001
+                    pass
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc))
+    return jsonify(ok=True, notes=notes)
+
+
+@app.route("/api/delete_note", methods=["POST"])
+def delete_note():
+    """Rimuove righe dal *.note.jsonl (toggle-off dell'evidenziazione).
+
+    Richiesta JSON: {"book": <book_key>, "cfis": ["epubcfi(...)", ...]}
+    Riscrive il file senza le righe con CFI corrispondente (match esatto).
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify(ok=False, error="Richiesta JSON non valida"), 400
+    book = str(data.get("book", ""))
+    cfis = data.get("cfis", [])
+    if not isinstance(cfis, list):
+        cfis = [cfis]
+    cfis = set(str(x) for x in cfis if x)
+    if not cfis:
+        return jsonify(ok=False, error="Nessun CFI indicato"), 400
+    path = _note_file_for_book(book)
+    if path is None:
+        return jsonify(ok=False, error="Nome libro non valido: " + book)
+    kept = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                except Exception:  # noqa: BLE001
+                    continue
+                if str(obj.get("cfi", "")) not in cfis:
+                    kept.append(s)
+    except FileNotFoundError:
+        return jsonify(ok=True, removed=0)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc))
+    removed = sum(1 for _ in open(path, encoding="utf-8")) - len(kept) if os.path.exists(path) else 0
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for s in kept:
+                f.write(s + "\n")
+        os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return jsonify(ok=False, error="Errore durante la scrittura: " + str(exc))
+    return jsonify(ok=True, removed=removed)
+
+
+@app.route("/api/upsert_note", methods=["POST"])
+def upsert_note():
+    """Crea o aggiorna una nota testuale (kind='note') nel *.note.jsonl.
+
+    Richiesta JSON: {"book": <book_key>, "cfi": "epubcfi(...)",
+                     "href": "...", "text": "...selezione...", "body": "testo libero"}
+    Match per (cfi, kind='note'): se esiste aggiorna body/updated, altrimenti appende.
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify(ok=False, error="Richiesta JSON non valida"), 400
+    book = str(data.get("book", ""))
+    cfi = str(data.get("cfi", ""))[:2000]
+    href = str(data.get("href", ""))[:500]
+    text = str(data.get("text", ""))[:2000]
+    body = str(data.get("body", ""))[:10000]
+    if not cfi:
+        return jsonify(ok=False, error="CFI mancante"), 400
+    path = _note_file_for_book(book)
+    if path is None:
+        return jsonify(ok=False, error="Nome libro non valido: " + book)
+    lines = []
+    found = False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                except Exception:  # noqa: BLE001
+                    continue
+                if str(obj.get("cfi", "")) == cfi and str(obj.get("kind", "")) == "note":
+                    obj["body"] = body
+                    obj["updated"] = datetime.now().isoformat(timespec="seconds")
+                    if text and not obj.get("text"):
+                        obj["text"] = text
+                    if href and not obj.get("href"):
+                        obj["href"] = href
+                    s = json.dumps(obj, ensure_ascii=False)
+                    found = True
+                lines.append(s)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc))
+    if not found:
+        entry = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "book": book,
+            "href": href,
+            "cfi": cfi,
+            "text": text,
+            "kind": "note",
+            "body": body,
+        }
+        lines.append(json.dumps(entry, ensure_ascii=False))
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for s in lines:
+                f.write(s + "\n")
+        os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return jsonify(ok=False, error="Errore durante la scrittura: " + str(exc))
+    return jsonify(ok=True, updated=found)
+
+
 @app.route("/api/books")
 def list_books():
     """Elenca i libri leggibili: prima l'epub non impacchettato (--book-dir),

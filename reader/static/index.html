@@ -704,6 +704,7 @@
       font-size: 13px;
     }
     #buildReport.open { display: flex; }
+    #noteEditor.open { display: flex !important; }
     #buildReportText {
       flex: 1;
       min-height: 180px;
@@ -893,6 +894,21 @@
       <span id="cssPath" style="flex:1;font-size:11px;color:#888;overflow:hidden;white-space:nowrap;text-overflow:ellipsis"></span>
       <button id="cssCancel">Annulla</button>
       <button id="cssSave" style="background:#3d7a3d">💾 Salva</button>
+    </div>
+  </div>
+
+  <!-- Popover nota testuale (Ctrl+Alt+N): testo libero legato a sottolineatura blu -->
+  <div id="noteEditor" aria-hidden="true" style="display:none;position:fixed;z-index:1100;top:50%;left:50%;transform:translate(-50%,-50%);width:520px;max-width:92vw;max-height:80vh;flex-direction:column;background:#262626;border:1px solid #666;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.55);overflow:hidden;font-size:14px">
+    <div class="metaHead">
+      <span>Nota sul passo selezionato</span>
+      <button id="noteClose" title="Chiudi (Esc)">✕</button>
+    </div>
+    <div id="noteEditorCtx" style="padding:8px 14px;background:#2f2f2f;border-bottom:1px solid #555;color:#bbb;font-style:italic;font-size:13px;max-height:25vh;overflow:auto"></div>
+    <textarea id="noteEditorBody" spellcheck="true" placeholder="Scrivi qui la nota…" style="flex:1;min-height:160px;border:none;outline:none;resize:vertical;padding:12px;background:#1e1e1e;color:#dcdcdc;font-family:Georgia,serif;font-size:14px;line-height:1.5;overflow:auto"></textarea>
+    <div class="metaFoot">
+      <span style="flex:1"></span>
+      <button id="noteDelete" title="Elimina la nota" style="background:#7a3d3d">🗑</button>
+      <button id="noteSave" style="background:#3d7a3d">💾 Salva</button>
     </div>
   </div>
 
@@ -1335,6 +1351,7 @@
     // ======================================================================
     function openBook(url) {
       closeInlineEditor();
+      try { closeNoteEditor(); } catch (e) {}
       closeMetaEditor();
       try{ closeCssEditor(); }catch(e){}
       closeBuildReport();
@@ -1352,6 +1369,7 @@
       }
       currentBookUrl = url.split("?")[0]; // toglie l'eventuale cache-buster
       currentHref = null;
+      try { noteCache = {}; appliedCfis = {}; } catch (e) {} // nuova apertura: ricarica note
       setStatus("Apertura del libro…");
 
       book = ePub(url);
@@ -1381,6 +1399,7 @@
       // colorato subito: renderTo crea il div .epub-container in modo sincrono.
       rendition.hooks.content.register(injectBgTheme);
       rendition.hooks.content.register(injectHyphenIt);
+      rendition.hooks.content.register(injectNoteStyles);
       applyBgToContainers();
 
       // Ad ogni render (apertura libro, cambio capitolo, resize) prepara
@@ -1393,6 +1412,9 @@
             bindInlineEdit(c); // prepara il popover in-context al click (invisibile)
             injectSpellStyles(c.document); // sottolineatura ortografica ✓
             injectSearchStyles(c.document); // stili highlight ricerca
+            injectNoteStyles(c); // stile evidenziazione note gialle
+            bindNoteKeys(c); // Ctrl+Alt+E dentro l'iframe del capitolo
+            restoreNotesForContents([c]); // riapplica le note del capitolo
           }
         });
       });
@@ -2303,6 +2325,296 @@
         "mark.search-highlight.active { background: #ff9800; outline: 2px solid #f57f17; }";
       doc.head.appendChild(style);
     }
+
+    // ==================================================================
+    // NOTE / EVIDENZIAZIONI (Ctrl+Alt+E): highlight giallo + salvataggio CFI
+    // La selezione viene convertita in CFI (cfiFromRange) e applicata con
+    // rendition.annotations.highlight(cfi); il CFI + testo + href vengono
+    // appesi a <libro>.note.jsonl via POST /api/save_note. All'apertura e a
+    // ogni render del capitolo le note vengono riapplicate (GET /api/get_notes).
+    // ==================================================================
+    var noteCache = {}; // bookKey -> [note]; evita GET ripetute per capitolo
+    var NOTE_STYLE = { "fill": "#ffff00", "fill-opacity": "0.35", "mix-blend-mode": "multiply" };
+    // Nota testuale: sottolineatura BLU continua (stile ancora/link), spessa per
+    // distinguerla dai link. Il rosso e' riservato allo spellcheck (wavy red).
+    var NOTE_UL_STYLE = { "stroke": "#1a73e8", "stroke-width": "2.5px" };
+    var NOTE_UL_EMPTY = { "stroke": "#1a73e8", "stroke-width": "2.5px", "stroke-dasharray": "4 2" };
+    var appliedCfis = {}; // CFI gia' presenti nello store annotations (evita doppi overlay)
+    // NOTA: gli highlight di epub.js NON sono span nel DOM ma overlay SVG
+    // (marks-pane): applicarli 2 volte sovrappone i rettangoli e il giallo
+    // si scurisce. appliedCfis impedisce la doppia applicazione.
+    function injectNoteStyles(contents) {
+      var doc = contents && (contents.document || contents);
+      if (!doc || !doc.head) return;
+      if (doc.getElementById("app-notes")) return;
+      var st = doc.createElement("style");
+      st.id = "app-notes";
+      st.textContent = ".epub-note-hl{background:#ffff00 !important;color:inherit !important;}";
+      doc.head.appendChild(st);
+    }
+    function bindNoteKeys(contents) {
+      var doc = contents && contents.document;
+      if (!doc || doc._noteKeysBound) return;
+      doc._noteKeysBound = true;
+      doc.addEventListener("keydown", function (e) {
+        if ((e.ctrlKey || e.metaKey) && e.altKey && String(e.key || "").toLowerCase() === "e") {
+          e.preventDefault();
+          e.stopPropagation();
+          addNoteFromSelection();
+        } else if ((e.ctrlKey || e.metaKey) && e.altKey && String(e.key || "").toLowerCase() === "n") {
+          e.preventDefault();
+          e.stopPropagation();
+          addTextNote();
+        }
+      });
+    }
+    function addNoteFromSelection() {
+      if (!rendition) { setStatus("Nessun libro aperto."); return; }
+      var contents = rendition.getContents();
+      if (!contents) return;
+      for (var i = 0; i < contents.length; i++) {
+        var c = contents[i];
+        if (!c || !c.document) continue;
+        var sel = null;
+        try { sel = c.document.getSelection(); } catch (e) { continue; }
+        if (!sel || sel.isCollapsed || !sel.rangeCount) continue;
+        var range = sel.getRangeAt(0);
+        var text = sel.toString().slice(0, 2000);
+        var cfi = null;
+        try { cfi = c.cfiFromRange(range) + ""; } catch (e) { cfi = null; }
+        if (!cfi) { setStatus("Selezione non convertibile in CFI."); return; }
+        // TOGGLE: la selezione coincide/si sovrappone a un highlight esistente -> rimuovilo
+        // (le note testuali kind:"note" sono indipendenti: vengono ignorate qui)
+        var overlapped = findOverlappingNotes(c, range, cfi, "hl");
+        if (overlapped.length) { removeNoteHighlights(overlapped); try { sel.collapseToEnd(); } catch (e) {} return; }
+        if (appliedCfis["hl:" + cfi]) { setStatus("Gi\u00e0 evidenziato."); try { sel.collapseToEnd(); } catch (e) {} return; }
+        try { rendition.annotations.highlight(cfi, {}, null, "epub-note-hl", NOTE_STYLE); }
+        catch (e) { setStatus("Errore highlight: " + e); return; }
+        appliedCfis["hl:" + cfi] = 1;
+        try { sel.collapseToEnd(); } catch (e) {}
+        var key = bookKey();
+        var entry = { book: key, href: currentHref || "", cfi: cfi + "", text: text };
+        if (!noteCache[key]) noteCache[key] = [];
+        noteCache[key].push({ href: entry.href, cfi: entry.cfi, text: entry.text });
+        fetch("/api/save_note", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(entry)
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          setStatus(d && d.ok ? "Nota salvata \u2713" : ("Nota non salvata: " + ((d && d.error) || "?")));
+        }).catch(function (err) { setStatus("Nota non salvata: " + err); });
+        return;
+      }
+      setStatus("Seleziona prima del testo da evidenziare.");
+    }
+    // Ritorna i CFI delle note esistenti che si sovrappongono alla selezione.
+    // Confronto prima per stringa esatta, poi per intersezione di Range DOM.
+    function findOverlappingNotes(contents, range, cfi, kind) {
+      var key = null;
+      try { key = bookKey(); } catch (e) { return []; }
+      var notes = noteCache[key] || [];
+      var hit = [];
+      var i, n;
+      function kindOf(x) { return (x && x.kind) ? x.kind : "hl"; }
+      for (i = 0; i < notes.length; i++) {
+        n = notes[i];
+        if (n && n.cfi === cfi && (!kind || kindOf(n) === kind)) { hit.push(n.cfi); }
+      }
+      if (hit.length) return hit;
+      for (i = 0; i < notes.length; i++) {
+        n = notes[i];
+        if (!n || !n.cfi) continue;
+        if (kind && ((n.kind || "hl") !== kind)) continue;
+        try {
+          var stored = contents.range(n.cfi);
+          if (!stored) continue;
+          var before = range.compareBoundaryPoints(Range.END_TO_START, stored) <= 0;
+          var after = range.compareBoundaryPoints(Range.START_TO_END, stored) >= 0;
+          if (!before && !after) hit.push(n.cfi);
+        } catch (e) {}
+      }
+      return hit;
+    }
+    function removeNoteHighlights(removedCfis) {
+      var key = null;
+      try { key = bookKey(); } catch (e) { return; }
+      removedCfis.forEach(function (hcfi) {
+        var isNote = false;
+        if (noteCache[key]) {
+          for (var i = 0; i < noteCache[key].length; i++) {
+            if (noteCache[key][i].cfi === hcfi && noteCache[key][i].kind === "note") { isNote = true; break; }
+          }
+        }
+        try { rendition.annotations.remove(hcfi, isNote ? "underline" : "highlight"); } catch (e) {}
+        delete appliedCfis["hl:" + hcfi];
+        delete appliedCfis["ul:" + hcfi];
+      });
+      if (noteCache[key]) {
+        noteCache[key] = noteCache[key].filter(function (n) {
+          return removedCfis.indexOf(n.cfi) < 0;
+        });
+      }
+      if (!removedCfis.length) { setStatus("Evidenziazione rimossa \u2713"); return; }
+      fetch("/api/delete_note", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ book: key, cfis: removedCfis })
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        setStatus(d && d.ok ? "Evidenziazione rimossa \u2713" : ("Rimozione non salvata: " + ((d && d.error) || "?")));
+      }).catch(function (err) { setStatus("Rimozione non salvata: " + err); });
+    }
+    // Applica una sottolineatura BLU cliccabile per una nota testuale.
+    // Il click sul mark apre il popover di lettura/edit. Nota vuota -> tratteggiata.
+    function applyNoteUnderline(n) {
+      if (!n || !n.cfi || appliedCfis["ul:" + n.cfi]) return;
+      var cfi = n.cfi;
+      var empty = !((n.body || "").trim());
+      try {
+        rendition.annotations.underline(cfi, { kind: "note" },
+          function () { openNoteEditor(cfi); },
+          "epub-note-ul", empty ? NOTE_UL_EMPTY : NOTE_UL_STYLE);
+        appliedCfis["ul:" + cfi] = 1;
+      } catch (e) {}
+    }
+    // Ctrl+Alt+N: crea una nota testuale INDIPENDENTE dal giallo.
+    // Nessun highlight: solo underline blu + riga kind:"note" nel .note.jsonl.
+    function addTextNote() {
+      if (!rendition) { setStatus("Nessun libro aperto."); return; }
+      var contents = rendition.getContents();
+      if (!contents) return;
+      for (var i = 0; i < contents.length; i++) {
+        var c = contents[i];
+        if (!c || !c.document) continue;
+        var sel = null;
+        try { sel = c.document.getSelection(); } catch (e) { continue; }
+        if (!sel || sel.isCollapsed || !sel.rangeCount) continue;
+        var range = sel.getRangeAt(0);
+        var text = sel.toString().slice(0, 2000);
+        var cfi = null;
+        try { cfi = c.cfiFromRange(range) + ""; } catch (e) { cfi = null; }
+        if (!cfi) { setStatus("Selezione non convertibile in CFI."); return; }
+        // Se la selezione tocca una nota esistente -> apri il popover, non duplicare
+        var overlapped = findOverlappingNotes(c, range, cfi, "note");
+        try { sel.collapseToEnd(); } catch (e) {}
+        if (overlapped.length) { openNoteEditor(overlapped[0]); return; }
+        var key = bookKey();
+        var entry = { book: key, href: currentHref || "", cfi: cfi, text: text, kind: "note", body: "" };
+        if (!noteCache[key]) noteCache[key] = [];
+        noteCache[key].push(entry);
+        applyNoteUnderline(entry);
+        fetch("/api/save_note", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(entry)
+        }).catch(function () {});
+        openNoteEditor(cfi);
+        return;
+      }
+      setStatus("Seleziona prima il passo da annotare.");
+    }
+    var noteEditorCfi = null; // CFI della nota aperta nel popover
+    function findNoteByCfi(cfi) {
+      var key = null;
+      try { key = bookKey(); } catch (e) { return null; }
+      var notes = noteCache[key] || [];
+      for (var i = 0; i < notes.length; i++) {
+        if (notes[i] && notes[i].cfi === cfi && notes[i].kind === "note") return notes[i];
+      }
+      return null;
+    }
+    function openNoteEditor(cfi) {
+      var n = findNoteByCfi(cfi);
+      if (!n) { setStatus("Nota non trovata."); return; }
+      noteEditorCfi = cfi;
+      document.getElementById("noteEditorCtx").textContent = "\u201c" + (n.text || "").slice(0, 300) + "\u201d";
+      var ta = document.getElementById("noteEditorBody");
+      ta.value = n.body || "";
+      var ed = document.getElementById("noteEditor");
+      ed.classList.add("open");
+      ed.setAttribute("aria-hidden", "false");
+      ta.focus();
+    }
+    function closeNoteEditor() {
+      var ed = document.getElementById("noteEditor");
+      ed.classList.remove("open");
+      ed.setAttribute("aria-hidden", "true");
+      noteEditorCfi = null;
+      if (document.activeElement) { try { document.activeElement.blur(); } catch (e) {} }
+    }
+    function saveNoteEditor() {
+      if (!noteEditorCfi) return;
+      var key = null;
+      try { key = bookKey(); } catch (e) { return; }
+      var n = findNoteByCfi(noteEditorCfi);
+      if (!n) { closeNoteEditor(); return; }
+      var body = document.getElementById("noteEditorBody").value.slice(0, 10000);
+      var wasEmpty = !((n.body || "").trim());
+      n.body = body;
+      // Aggiorna tratteggiata<->continua: rimuovi e riapplica con lo stile giusto
+      try { rendition.annotations.remove(n.cfi, "underline"); } catch (e) {}
+      delete appliedCfis["ul:" + n.cfi];
+      applyNoteUnderline(n);
+      fetch("/api/upsert_note", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ book: key, cfi: n.cfi, href: n.href || "", text: n.text || "", body: body })
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        setStatus(d && d.ok ? (wasEmpty ? "Nota creata \u2713" : "Nota salvata \u2713") : ("Nota non salvata: " + ((d && d.error) || "?")));
+      }).catch(function (err) { setStatus("Nota non salvata: " + err); });
+      closeNoteEditor();
+    }
+    function deleteNoteEditor() {
+      if (!noteEditorCfi) return;
+      var cfi = noteEditorCfi;
+      closeNoteEditor();
+      removeNoteHighlights([cfi]);
+      setStatus("Nota eliminata \u2713");
+    }
+    function restoreNotesForContents(contents) {
+      var key = null;
+      try { key = bookKey(); } catch (e) { return; }
+      if (!key || !contents) return;
+      function apply(notes) {
+        contents.forEach(function (c) {
+          if (!c || !c.document) return;
+          var chapHref = "";
+          try { chapHref = (c.href || "").split("#")[0]; } catch (e) {}
+          (notes || []).forEach(function (n) {
+            if (!n || !n.cfi) return;
+            if (n.href && chapHref && n.href.split("#")[0] !== chapHref &&
+                n.href !== chapHref && chapHref.indexOf(n.href) < 0 && n.href.indexOf(chapHref) < 0) return;
+            if (n.kind === "note") { applyNoteUnderline(n); return; }
+            if (appliedCfis["hl:" + n.cfi]) return;
+            try { rendition.annotations.highlight(n.cfi, {}, null, "epub-note-hl", NOTE_STYLE); appliedCfis["hl:" + n.cfi] = 1; }
+            catch (e) {}
+          });
+        });
+      }
+      if (noteCache[key]) { apply(noteCache[key]); return; }
+      fetch("/api/get_notes?book=" + encodeURIComponent(key)).then(function (r) {
+        return r.ok ? r.json() : null;
+      }).then(function (d) {
+        var notes = (d && d.notes) || [];
+        noteCache[key] = notes;
+        apply(notes);
+      }).catch(function () {});
+    }
+    document.addEventListener("keydown", function (e) {
+      if ((e.ctrlKey || e.metaKey) && e.altKey && String(e.key || "").toLowerCase() === "e") {
+        if (!rendition) return;
+        e.preventDefault();
+        addNoteFromSelection();
+      } else if ((e.ctrlKey || e.metaKey) && e.altKey && String(e.key || "").toLowerCase() === "n") {
+        if (!rendition) return;
+        e.preventDefault();
+        addTextNote();
+      } else if (e.key === "Escape" && noteEditorCfi) {
+        closeNoteEditor();
+      }
+    });
+    document.getElementById("noteSave").addEventListener("click", saveNoteEditor);
+    document.getElementById("noteDelete").addEventListener("click", deleteNoteEditor);
+    document.getElementById("noteClose").addEventListener("click", closeNoteEditor);
 
     // ==================================================================
     // Controllo ortografico (solo paragrafo selezionato, solo temporaneo)
