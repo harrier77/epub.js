@@ -1457,6 +1457,9 @@
             restoreNotesForContents([c]); // riapplica le note del capitolo
           }
         });
+        // Il layout delle colonne si assesta DOPO il render (webfont,
+        // immagini, sillabazione): riposiziona i segni a layout stabile.
+        scheduleNoteRepaint(400);
       });
 
       // Swipe orizzontale per girare pagina. Gli eventi touch arrivano dai
@@ -1611,6 +1614,8 @@
         // next alla fine) così il click non "sembra" rotto.
         document.getElementById("prev").disabled = !!location.atStart;
         document.getElementById("next").disabled = !!location.atEnd;
+        // Cambio pagina = nuove view con layout fresco: riallinea i segni.
+        scheduleNoteRepaint(300);
       });
     }
 
@@ -1890,6 +1895,7 @@
             });
             searchInChapter(q);
           }
+          scheduleNoteRepaint(500); // riallinea i segni sul layout ricaricato
         }).catch(function () {});
         setStatus("Capitolo ricaricato dal disco ✓");
       }).catch(function (err) {
@@ -2419,13 +2425,67 @@
     // doc.__lastSelRange (snapshot di bindInlineEdit) e ripristinata prima
     // dell'azione cosi' il CFI resta corretto anche se il menu l'ha collassata.
     // ==================================================================
-    var ctxMenu = null, ctxPending = null; // {contents, el, px, py}
+    var ctxMenu = null, ctxPending = null; // {contents, el, px, py, ix, iy, target, range, fr}
+    var ctxEditAt = 0;
+    // BUGFIX (dblclick vs ctx menu): timestamp of the last dblclick-driven edit.
+    // While the inline editor was just opened (or is still open) fire() must
+    // NOT show the menu, otherwise a double-tap shows BOTH edit and menu.
+    function ctxMenuOpen() {
+      var m = ctxMenuEl();
+      return !!(m && m.classList.contains("open"));
+    }
     function ctxMenuEl() {
       if (!ctxMenu) ctxMenu = document.getElementById("ctxMenu");
       return ctxMenu;
     }
+    // SELEZIONE SOFTWARE: overlay di div dentro l'iframe che mostra il passo
+    // scelto senza selezione nativa visibile (niente ActionMode Android).
+    // Il DOM non viene toccato: i CFI restano validi. Nessun listener: i div
+    // hanno pointer-events:none e non intercettano tocchi/click.
+    var ctxSoftMarks = []; // div overlay correnti
+    function clearCtxSoftSel() {
+      for (var i = 0; i < ctxSoftMarks.length; i++) {
+        try { if (ctxSoftMarks[i].parentNode) ctxSoftMarks[i].parentNode.removeChild(ctxSoftMarks[i]); } catch (e) {}
+      }
+      ctxSoftMarks = [];
+    }
+    function paintCtxSoftSel(doc, range) {
+      clearCtxSoftSel();
+      if (!doc || !range) return;
+      var rects = null;
+      try { rects = range.getClientRects(); } catch (e) { return; }
+      if (!rects || !rects.length) return;
+      var sx = 0, sy = 0;
+      try { sx = doc.defaultView.scrollX || doc.documentElement.scrollLeft || 0; } catch (e) {}
+      try { sy = doc.defaultView.scrollY || doc.documentElement.scrollTop || 0; } catch (e) {}
+      var host = doc.body || doc.documentElement;
+      if (!host) return;
+      // Stile una volta sola per documento
+      try {
+        if (!doc.getElementById("ctx-soft-style")) {
+          var st = doc.createElement("style");
+          st.id = "ctx-soft-style";
+          st.textContent = ".ctx-soft-mark{position:absolute;pointer-events:none;" +
+            "background:rgba(90,127,176,.38);border-radius:2px;z-index:9999;}";
+          doc.head.appendChild(st);
+        }
+      } catch (e) {}
+      for (var i = 0; i < rects.length; i++) {
+        var r = rects[i];
+        if (!r || (r.width <= 0 && r.height <= 0)) continue;
+        var mk = doc.createElement("div");
+        mk.className = "ctx-soft-mark";
+        mk.style.left = (sx + r.left) + "px";
+        mk.style.top = (sy + r.top) + "px";
+        mk.style.width = r.width + "px";
+        mk.style.height = r.height + "px";
+        host.appendChild(mk);
+        ctxSoftMarks.push(mk);
+      }
+    }
     function hideCtxMenu() {
       var m = ctxMenuEl();
+      clearCtxSoftSel();
       if (!m) return;
       m.classList.remove("open");
       m.setAttribute("aria-hidden", "true");
@@ -2447,21 +2507,92 @@
       m.setAttribute("aria-hidden", "false");
       var mw = 220, mh = 170;
       try { mw = m.offsetWidth || mw; mh = m.offsetHeight || mh; } catch (e) {}
-      m.style.left = Math.max(8, Math.min(x, window.innerWidth - mw - 8)) + "px";
-      m.style.top = Math.max(8, Math.min(y, window.innerHeight - mh - 8)) + "px";
+      // Posiziona il menu LONTANO dal frammento selezionato: ricava il rect
+      // della selezione in coordinate pagina (rect iframe + rect range) e
+      // sceglie il lato con piu' spazio libero (sotto/sopra), con gap di 14px.
+      // Fallback: punto di tocco spostato in diagonale (+18,+24).
+      var px = x + 18, py = y + 24;
+      // BUGFIX (menu covers selection): the touch point may fall outside the
+      // iframe (padding/edges), so re-match the iframe rect from ctxPending.fr
+      // photographed in fire(). Fall back to point-matching, then to 0,0.
+      // The authoritative range is ctxPending.range (see fire() BUGFIX above).
+      var selPg = null;
+      try {
+        var dd = ctxPending && ctxPending.contents && ctxPending.contents.document;
+        // Fonte autorevole: il clone fotografato in fire(); poi live, poi snapshot.
+        var rng = (ctxPending && ctxPending.range) || null;
+        if (!rng) {
+          var ss = dd && dd.getSelection ? dd.getSelection() : null;
+          if (ss && ss.rangeCount && !ss.isCollapsed) rng = ss.getRangeAt(0);
+          else if (dd && dd.__lastSelRange) rng = dd.__lastSelRange;
+        }
+        var rr = rng ? rng.getBoundingClientRect() : null;
+        if (rr && (rr.width + rr.height > 0)) {
+          // Offset iframe: riusa quello fotografato in fire() (il punto di
+          // tocco puo' cadere fuori dall'iframe e il match qui fallirebbe).
+          var fr2 = (ctxPending && ctxPending.fr) || null;
+          if (!fr2) {
+            var ifrs2 = document.querySelectorAll("#viewer iframe");
+            for (var k = 0; k < ifrs2.length; k++) {
+              var q = ifrs2[k].getBoundingClientRect();
+              if (x >= q.left && x <= q.right && y >= q.top && y <= q.bottom) { fr2 = q; break; }
+            }
+          }
+          var ox = fr2 ? fr2.left : 0, oy = fr2 ? fr2.top : 0;
+          var sL = ox + rr.left, sT = oy + rr.top, sR = ox + rr.right, sB = oy + rr.bottom;
+          selPg = { l: sL, t: sT, r: sR, b: sB };
+          var gap = 14;
+          var spaceBelow = window.innerHeight - sB, spaceAbove = sT;
+          var my = (spaceBelow >= mh + gap) ? sB + gap
+               : (spaceAbove >= mh + gap) ? sT - mh - gap
+               : (spaceBelow >= spaceAbove) ? Math.max(8, window.innerHeight - mh - 8) : 8;
+          // Orizzontale: allinea al bordo selezione piu' lontano dal tocco,
+          // cosi' il menu non copre il frammento in larghezza.
+          var mx = (x < (sL + sR) / 2) ? sL : sR - mw;
+          px = Math.max(8, Math.min(mx, window.innerWidth - mw - 8));
+          py = Math.max(8, Math.min(my, window.innerHeight - mh - 8));
+        }
+      } catch (e) {}
+      // BUGFIX (menu covers selection): post-placement intersection guarantee.
+      // If the menu still overlaps the software selection (misread metrics,
+      // shifted iframe, open keyboard...), flip to the opposite vertical side,
+      // then to the opposite screen edge. The menu must NEVER cover the fragment.
+      if (selPg) {
+        var M2 = 4;
+        var hits = function (lx, ty) {
+          return lx < selPg.r + M2 && lx + mw > selPg.l - M2 &&
+                 ty < selPg.b + M2 && ty + mh > selPg.t - M2;
+        };
+        var maxX = Math.max(8, window.innerWidth - mw - 8);
+        var maxY = Math.max(8, window.innerHeight - mh - 8);
+        if (hits(px, py)) {
+          var altY = (py + mh / 2 < (selPg.t + selPg.b) / 2)
+            ? selPg.b + 14 : selPg.t - mh - 14;
+          altY = Math.max(8, Math.min(altY, maxY));
+          if (!hits(px, altY)) py = altY;
+          else {
+            var altX = (px + mw / 2 < window.innerWidth / 2) ? 8 : maxX;
+            if (!hits(altX, py)) px = altX;
+            else if (!hits(altX, altY)) { px = altX; py = altY; }
+          }
+        }
+      }
+      m.style.left = Math.max(8, Math.min(px, window.innerWidth - mw - 8)) + "px";
+      m.style.top = Math.max(8, Math.min(py, window.innerHeight - mh - 8)) + "px";
     }
     function restoreCtxSelection() {
-      // Il tap sul menu puo' collassare la selezione: ripristina il Range
-      // salvato cosi' addNoteFromSelection/addTextNote trovano il testo.
+      // BUGFIX (stale fragment): ctxPending.range (this gesture's clone) wins
+      // over __lastSelRange, which may have been overwritten since fire().
       try {
         var d = ctxPending && ctxPending.contents && ctxPending.contents.document;
         if (!d) return;
         var s = d.getSelection ? d.getSelection() : null;
         if (!s) return;
         if (!s.isCollapsed && s.rangeCount) return;
-        if (d.__lastSelRange) {
+        var r = (ctxPending && ctxPending.range) || d.__lastSelRange;
+        if (r) {
           s.removeAllRanges();
-          s.addRange(d.__lastSelRange.cloneRange());
+          s.addRange(r.cloneRange());
         }
       } catch (e) {}
     }
@@ -2502,12 +2633,75 @@
       }
       function fire(x, y) {
         if (!isMobileDevice()) return; // solo mobile: desktop usa menu nativo
+        // BUGFIX (dblclick vs ctx menu): mutual exclusion — never show the menu
+        // on top of a just-opened editor (double-tap must yield ONLY the edit).
+        if (inlineEditor.classList.contains("open")) return;
+        if (Date.now() - ctxEditAt < 1000) return;
         lpFired = true;
+        // BUGFIX (stale fragment on 2nd+ selection): snapshot the LIVE range of
+        // THIS gesture right now. doc.__lastSelRange may still hold the PREVIOUS
+        // selection (its snapshot listeners may not have run yet for the new
+        // one), so the local clone is authoritative from here on.
+        // Fotografa SUBITO il Range live di QUESTO gesto: __lastSelRange puo'
+        // contenere ancora la selezione precedente (snapshot non ancora
+        // scattato per la nuova), quindi il clone locale fa fede.
+        var liveRange = null;
+        try {
+          var _lv = doc.getSelection ? doc.getSelection() : null;
+          if (_lv && _lv.rangeCount && !_lv.isCollapsed)
+            liveRange = _lv.getRangeAt(0).cloneRange();
+        } catch (e) {}
+        if (!liveRange && doc.__lastSelRange) {
+          try { liveRange = doc.__lastSelRange.cloneRange(); } catch (e) {}
+        }
         var el = targetBlock(x - 0, y - 0);
-        // Coordinate viewport: l'iframe e' dentro #viewer, elementFromPoint e'
-        // gia' relativo al documento iframe; per il menu servono coords pagina:
-        // touch/contextmenu forniscono clientX/Y pagina -> uso diretto.
-        ctxPending = { contents: contents, el: el, px: x, py: y };
+        if (!el && liveRange) {
+          try { el = inlineBlockFrom(liveRange.startContainer); } catch (e) {}
+        }
+        // BUGFIX (stale fragment): openInlineEditor/captureSelectionSpan work in
+        // iframe-viewport coords (caretRangeFromPoint), but touch/contextmenu give
+        // PAGE coords. Convert here (subtract the iframe rect) and carry the real
+        // target element; otherwise the point-test misses and the editor falls
+        // back to the PREVIOUS fragment.
+        var ix = x, iy = y, tgt = null, fr0 = null;
+        try {
+          var ifrs0 = document.querySelectorAll("#viewer iframe");
+          for (var j0 = 0; j0 < ifrs0.length; j0++) {
+            var q0 = ifrs0[j0].getBoundingClientRect();
+            if (x >= q0.left && x <= q0.right && y >= q0.top && y <= q0.bottom) {
+              ix = x - q0.left; iy = y - q0.top; fr0 = q0; break;
+            }
+          }
+          tgt = doc.elementFromPoint(ix, iy);
+        } catch (e) {}
+        // Coordinate viewport: per il menu servono coords pagina (touch/
+        // contextmenu forniscono clientX/Y pagina -> uso diretto).
+        ctxPending = { contents: contents, el: el, px: x, py: y,
+          ix: ix, iy: iy, target: tgt, range: liveRange, fr: fr0 };
+        // BUGFIX (Android Translate popup): paint a SOFTWARE selection (overlay
+        // divs, DOM untouched so CFIs stay valid), THEN collapse the native
+        // selection. With no visible native selection Android opens no
+        // Translate/Copy/Share ActionMode. The Range survives in
+        // ctxPending.range / __lastSelRange and is restored on menu-tap.
+        try {
+          var _s2 = doc.getSelection ? doc.getSelection() : null;
+          var _r = null;
+          if (_s2 && _s2.rangeCount && !_s2.isCollapsed) _r = _s2.getRangeAt(0);
+          else if (doc.__lastSelRange) _r = doc.__lastSelRange;
+          if (_r) paintCtxSoftSel(doc, _r);
+        } catch (e) {}
+        // Collassa subito la selezione nativa: il Range resta salvato in
+        // doc.__lastSelRange (snapshot di bindInlineEdit) per le azioni, ma
+        // senza selezione visibile Android non apre Traduci/Copia/Condividi.
+        // restoreCtxSelection() la rimette in piedi solo all'atto del tap su
+        // Evidenzia/Nota, e quelle funzioni la ricollassano dopo l'uso.
+        // BUGFIX (stale fragment): publish THIS gesture's range into
+        // __lastSelRange too, so late readers never see the previous fragment.
+        try {
+          if (liveRange) doc.__lastSelRange = liveRange.cloneRange();
+          var _s = doc.getSelection ? doc.getSelection() : null;
+          if (_s && !_s.isCollapsed) _s.removeAllRanges();
+        } catch (e) {}
         showCtxMenu(x, y);
       }
       // Tasto destro / contextmenu nativo: solo mobile viene soppresso e
@@ -2544,24 +2738,52 @@
           }
         }, { passive: true, capture: true });
       });
+      // BUGFIX (software selection): overlay marks are absolutely positioned, so
+      // a scroll with the menu open would leave them stranded over the wrong
+      // text. Drop them (the CFI in ctxPending.range stays safe).
+      doc.addEventListener("scroll", function () {
+        if (ctxMenuOpen()) clearCtxSoftSel();
+      }, { passive: true, capture: true });
     }
     // Voci del menu: chiudono il menu, ripristinano la selezione, agiscono.
     document.getElementById("ctxEdit").addEventListener("click", function () {
       var p = ctxPending; hideCtxMenu();
       if (!p || !p.contents) return;
+      // BUGFIX (stale fragment): restore THIS gesture's selection first —
+      // captureSelectionSpan and clickedTextNodeIndex read the live selection —
+      // and pass iframe-relative coords + the real target (see fire() BUGFIX).
+      ctxPending = p;
+      restoreCtxSelection();
       var el = p.el;
       if (!el && p.contents.document && p.contents.document.__lastSelRange) {
         try { el = inlineBlockFrom(p.contents.document.__lastSelRange.startContainer); } catch (e) {}
       }
-      if (!el) { setStatus("Tocca prima un paragrafo."); return; }
-      openInlineEditor(p.contents, el, { clientX: p.px, clientY: p.py }, true);
+      if (!el) { setStatus("Tocca prima un paragrafo."); ctxPending = null; return; }
+      // ev iframe-relative (ix/iy) + target reale: il point-test interno
+      // ritrova il frammento corrente invece del precedente.
+      openInlineEditor(p.contents, el,
+        { clientX: p.ix, clientY: p.iy, target: p.target || undefined }, true);
       ctxPending = null;
     });
+    function collapseCtxSelection() {
+      // Toglie la selezione visibile (anti ActionMode Android) mantenendo
+      // doc.__lastSelRange per eventuali riusi.
+      try {
+        var d = ctxPending && ctxPending.contents && ctxPending.contents.document;
+        var s = d && d.getSelection ? d.getSelection() : null;
+        if (s && !s.isCollapsed) s.removeAllRanges();
+      } catch (e) {}
+    }
     document.getElementById("ctxHl").addEventListener("click", function () {
-      hideCtxMenu(); restoreCtxSelection(); addNoteFromSelection(); ctxPending = null;
+      hideCtxMenu(); restoreCtxSelection(); addNoteFromSelection();
+      collapseCtxSelection(); ctxPending = null;
     });
     document.getElementById("ctxNote").addEventListener("click", function () {
-      hideCtxMenu(); restoreCtxSelection(); addTextNote(); ctxPending = null;
+      hideCtxMenu(); restoreCtxSelection(); addTextNote();
+      // addTextNote apre il popover nota: ricollassa dopo un tick, quando
+      // il focus e' passato al textarea del popover.
+      setTimeout(collapseCtxSelection, 0);
+      ctxPending = null;
     });
     // Tap fuori dal menu lo chiude (senza aprire l'editor sotto).
     document.addEventListener("pointerdown", function (e) {
@@ -2642,13 +2864,14 @@
       var key = null;
       try { key = bookKey(); } catch (e) { return; }
       removedCfis.forEach(function (hcfi) {
-        var isNote = false;
-        if (noteCache[key]) {
-          for (var i = 0; i < noteCache[key].length; i++) {
-            if (noteCache[key][i].cfi === hcfi && noteCache[key][i].kind === "note") { isNote = true; break; }
-          }
-        }
-        try { rendition.annotations.remove(hcfi, isNote ? "underline" : "highlight"); } catch (e) {}
+        // BUGFIX (ghost yellow until reload): a blue note and a yellow highlight
+        // may share the very same CFI string (Highlight + Note on one selection).
+        // Classifying by kind picked the wrong type, and annotations.remove()
+        // silently no-opped (store is hashed by cfi+type), orphaning the SVG mark
+        // in the DOM. Remove BOTH types: idempotent, the missing one is a no-op,
+        // and detach() scrubs the marks pane synchronously (no reload needed).
+        try { rendition.annotations.remove(hcfi, "highlight"); } catch (e) {}
+        try { rendition.annotations.remove(hcfi, "underline"); } catch (e) {}
         delete appliedCfis["hl:" + hcfi];
         delete appliedCfis["ul:" + hcfi];
       });
@@ -2769,8 +2992,25 @@
     function deleteNoteEditor() {
       if (!noteEditorCfi) return;
       var cfi = noteEditorCfi;
+      // BUGFIX (fragment stays yellow): a separate YELLOW highlight may coexist
+      // on the same passage (same CFI or overlapping range, e.g. Highlight +
+      // Note on one fragment). Collect overlapping "hl" CFIs and remove them
+      // together, otherwise the yellow survives the note deletion.
+      var extra = [];
+      try {
+        var ncontents = rendition ? rendition.getContents() : null;
+        for (var di = 0; ncontents && di < ncontents.length; di++) {
+          var cc = ncontents[di];
+          if (!cc || !cc.document) continue;
+          var nrng = null;
+          try { nrng = cc.range(cfi); } catch (e) { nrng = null; }
+          if (!nrng) continue;
+          extra = findOverlappingNotes(cc, nrng, cfi, "hl");
+          break;
+        }
+      } catch (e) {}
       closeNoteEditor();
-      removeNoteHighlights([cfi]);
+      removeNoteHighlights([cfi].concat(extra || []));
       setStatus("Nota eliminata \u2713");
     }
     function restoreNotesForContents(contents) {
@@ -2800,8 +3040,54 @@
         var notes = (d && d.notes) || [];
         noteCache[key] = notes;
         apply(notes);
+        scheduleNoteRepaint(400); // fetch async: il layout e' andato avanti, riallinea
       }).catch(function () {});
     }
+    // ==================================================================
+    // BUGFIX (misplaced marks after reload): epub.js SVG overlays are positioned
+    // from the rects at apply time, but after a (re)load the column layout
+    // settles LATER (webfonts, images, hyphenation, zoom) and marks stay frozen
+    // off-place until views are recreated. Repaint = remove + re-add every
+    // applied CFI so rects are recomputed on the current layout. DOM untouched,
+    // CFIs stay valid, appliedCfis stays consistent.
+    // ==================================================================
+    var noteRepaintTimer = null;
+    function scheduleNoteRepaint(delay) {
+      if (noteRepaintTimer) clearTimeout(noteRepaintTimer);
+      noteRepaintTimer = setTimeout(function () {
+        noteRepaintTimer = null;
+        repaintNoteMarks();
+      }, delay || 350);
+    }
+    function repaintNoteMarks() {
+      if (!rendition || !rendition.annotations) return;
+      var keys = Object.keys(appliedCfis || {});
+      if (!keys.length) return;
+      keys.forEach(function (k) {
+        var i = k.indexOf(":");
+        if (i < 0) return;
+        var type = k.slice(0, i), cfi = k.slice(i + 1);
+        if (!cfi) return;
+        try {
+          if (type === "hl") {
+            rendition.annotations.remove(cfi, "highlight");
+            rendition.annotations.highlight(cfi, {}, null, "epub-note-hl", NOTE_STYLE);
+          } else if (type === "ul") {
+            var n = findNoteByCfi(cfi);
+            if (!n) return;
+            rendition.annotations.remove(cfi, "underline");
+            delete appliedCfis[k];
+            applyNoteUnderline(n); // riapplica con stile giusto (vuota/piena)
+          }
+        } catch (e) { /* CFI non piu' risolvibile (capitolo modificato): salta */ }
+      });
+    }
+    // I webfont spostano le colonne anche a libro gia' aperto: riallinea.
+    try {
+      if (document.fonts && document.fonts.addEventListener) {
+        document.fonts.addEventListener("loadingdone", function () { scheduleNoteRepaint(150); });
+      }
+    } catch (e) {}
     document.addEventListener("keydown", function (e) {
       if ((e.ctrlKey || e.metaKey) && e.altKey && String(e.key || "").toLowerCase() === "e") {
         if (!rendition) return;
@@ -3662,6 +3948,14 @@
         // solo con Annulla / ✕ / Esc / Salva. I link continuano a navigare (li
         // gestisce epub.js); se il capitolo cambia, "relocated" chiude il popover.
         if (inlineEditor.classList.contains("open")) return;
+        // Menu contestuale aperto: i tap nel libro non preparano l'edit sotto.
+        // BUGFIX (dblclick vs ctx menu): while the menu is open, taps in the book
+        // must not prepare/replace the edit underneath; the outside-tap handler
+        // closes the menu instead.
+        try {
+          var _cm = document.getElementById("ctxMenu");
+          if (_cm && _cm.classList.contains("open")) return;
+        } catch (err) {}
         var t = e.target;
         if (t && t.closest && t.closest("a")) { closeInlineEditor(); return; } // i link li gestisce epub.js
         var el = t ? inlineBlockFrom(t) : null;
@@ -3680,12 +3974,17 @@
       // modalita' "Intero" (tutto il paragrafo HTML), ignorando frammento
       // e selezione. Il touch resta invariato (tap + bottone 🔠).
       doc.addEventListener("dblclick", function (e) {
+        // Se il menu e' aperto ha priorita': il dblclick lo chiude e basta,
+        // senza aprire anche l'edit (altrimenti si vedono entrambi).
+        if (ctxMenuOpen()) { hideCtxMenu(); return; }
         if (e.button && e.button !== 0) return;
         if (inlineEditor.classList.contains("open")) return;
         var t = e.target;
         if (t && t.closest && t.closest("a")) return;
         var el = t ? inlineBlockFrom(t) : null;
         if (!el) return;
+        hideCtxMenu(); // mai edit + menu insieme: il dblclick mostra solo l'edit
+        ctxEditAt = Date.now(); // sopprime il long-press/contextmenu a seguire
         openInlineEditor(contents, el, e, true);
         setInlineMode("full");
         // Posizione fissa: centrato orizzontalmente, in alto.
