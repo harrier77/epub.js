@@ -781,6 +781,39 @@
     }
     #searchClose:hover { color: #fff !important; }
 
+    /* Menu contestuale mobile (long-press / tasto destro): Edit / Evidenzia / Nota.
+       Solo mobile: su desktop il contextmenu nativo resta invariato. */
+    #ctxMenu {
+      display: none;
+      position: fixed;
+      z-index: 3000;
+      background: #2f2f2f;
+      border: 1px solid #666;
+      border-radius: 10px;
+      box-shadow: 0 6px 24px rgba(0,0,0,.55);
+      padding: 6px;
+      min-width: 200px;
+      max-width: 78vw;
+    }
+    #ctxMenu.open { display: block; }
+    #ctxMenu button {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      background: none;
+      border: none;
+      border-radius: 6px;
+      color: #eee;
+      font-size: 15px;
+      padding: 12px 14px;
+      cursor: pointer;
+      text-align: left;
+      touch-action: manipulation;
+    }
+    #ctxMenu button:active { background: #5a7fb0; color: #fff; }
+    #ctxMenu button:disabled { opacity: .4; }
+
     /* Search highlight marks - style injected into iframe */
     /* These are fallback styles, main styles are injected via JS */
 
@@ -796,6 +829,13 @@
     <button id="searchPrev" title="Previous match">◀</button>
     <button id="searchNext" title="Next match">▶</button>
     <button id="searchClose" title="Close search">✕</button>
+  </div>
+
+  <!-- Menu contestuale mobile: long-press / tasto destro -> Edit / Evidenzia / Nota -->
+  <div id="ctxMenu" role="menu" aria-hidden="true">
+    <button id="ctxEdit" role="menuitem">✏️ Modifica</button>
+    <button id="ctxHl" role="menuitem">🟡 Evidenzia</button>
+    <button id="ctxNote" role="menuitem">📝 Nota</button>
   </div>
 
   <div id="toolbarShowZone" title="Mostra toolbar">&#9662;</div>
@@ -2349,10 +2389,12 @@
       if (doc.getElementById("app-notes")) return;
       var st = doc.createElement("style");
       st.id = "app-notes";
-      st.textContent = ".epub-note-hl{background:#ffff00 !important;color:inherit !important;}";
+      st.textContent = ".epub-note-hl{background:#ffff00 !important;color:inherit !important;}" +
+        " *{-webkit-touch-callout:none !important;}";
       doc.head.appendChild(st);
     }
     function bindNoteKeys(contents) {
+      bindCtxMenu(contents); // menu mobile long-press/tasto destro (solo mobile)
       var doc = contents && contents.document;
       if (!doc || doc._noteKeysBound) return;
       doc._noteKeysBound = true;
@@ -2368,6 +2410,167 @@
         }
       });
     }
+    // ==================================================================
+    // MENU CONTESTUALE MOBILE (solo mobile: desktop invariato)
+    // Long-press (~550ms, passive: non rompe swipe) o tasto destro/contextmenu
+    // dentro l'iframe -> menu con 3 voci: Modifica / Evidenzia / Nota.
+    // Usa le funzioni esistenti: openInlineEditor (edit), addNoteFromSelection
+    // (giallo), addTextNote (nota blu). La selezione e' preservata via
+    // doc.__lastSelRange (snapshot di bindInlineEdit) e ripristinata prima
+    // dell'azione cosi' il CFI resta corretto anche se il menu l'ha collassata.
+    // ==================================================================
+    var ctxMenu = null, ctxPending = null; // {contents, el, px, py}
+    function ctxMenuEl() {
+      if (!ctxMenu) ctxMenu = document.getElementById("ctxMenu");
+      return ctxMenu;
+    }
+    function hideCtxMenu() {
+      var m = ctxMenuEl();
+      if (!m) return;
+      m.classList.remove("open");
+      m.setAttribute("aria-hidden", "true");
+    }
+    function showCtxMenu(x, y) {
+      var m = ctxMenuEl();
+      if (!m) return;
+      // Abilita Evidenzia/Nota solo se c'e' una selezione non collassata
+      var hasSel = false;
+      try {
+        var d = ctxPending && ctxPending.contents && ctxPending.contents.document;
+        var s = d && d.getSelection ? d.getSelection() : null;
+        if (s && !s.isCollapsed && s.rangeCount) hasSel = true;
+        else if (d && d.__lastSelRange) hasSel = true;
+      } catch (e) {}
+      document.getElementById("ctxHl").disabled = !hasSel;
+      document.getElementById("ctxNote").disabled = !hasSel;
+      m.classList.add("open");
+      m.setAttribute("aria-hidden", "false");
+      var mw = 220, mh = 170;
+      try { mw = m.offsetWidth || mw; mh = m.offsetHeight || mh; } catch (e) {}
+      m.style.left = Math.max(8, Math.min(x, window.innerWidth - mw - 8)) + "px";
+      m.style.top = Math.max(8, Math.min(y, window.innerHeight - mh - 8)) + "px";
+    }
+    function restoreCtxSelection() {
+      // Il tap sul menu puo' collassare la selezione: ripristina il Range
+      // salvato cosi' addNoteFromSelection/addTextNote trovano il testo.
+      try {
+        var d = ctxPending && ctxPending.contents && ctxPending.contents.document;
+        if (!d) return;
+        var s = d.getSelection ? d.getSelection() : null;
+        if (!s) return;
+        if (!s.isCollapsed && s.rangeCount) return;
+        if (d.__lastSelRange) {
+          s.removeAllRanges();
+          s.addRange(d.__lastSelRange.cloneRange());
+        }
+      } catch (e) {}
+    }
+    function bindCtxMenu(contents) {
+      var doc = contents && contents.document;
+      if (!doc || doc._ctxMenuBound) return;
+      doc._ctxMenuBound = true;
+      var lpTimer = null, lpX = 0, lpY = 0, lpFired = false;
+      function targetBlock(cx, cy) {
+        // 1) selezione (piu' affidabile: coordinate gia' corrette)
+        try {
+          var s = doc.getSelection();
+          if (s && s.rangeCount && !s.isCollapsed) {
+            var b = inlineBlockFrom(s.getRangeAt(0).startContainer);
+            if (b) return b;
+          }
+        } catch (e) {}
+        if (doc.__lastSelRange) {
+          try {
+            var b2 = inlineBlockFrom(doc.__lastSelRange.startContainer);
+            if (b2) return b2;
+          } catch (e) {}
+        }
+        // 2) best-effort: punto toccato (cx/cy sono coords pagina, l'iframe
+        // puo' essere offsettato: converti sottraendo il rect dell'iframe)
+        var t = null;
+        try {
+          var fr = null;
+          var ifrs = document.querySelectorAll("#viewer iframe");
+          for (var i = 0; i < ifrs.length; i++) {
+            var r = ifrs[i].getBoundingClientRect();
+            if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) { fr = r; break; }
+          }
+          t = doc.elementFromPoint(fr ? cx - fr.left : cx, fr ? cy - fr.top : cy);
+        } catch (e) {}
+        var el = t ? inlineBlockFrom(t) : null;
+        return el;
+      }
+      function fire(x, y) {
+        if (!isMobileDevice()) return; // solo mobile: desktop usa menu nativo
+        lpFired = true;
+        var el = targetBlock(x - 0, y - 0);
+        // Coordinate viewport: l'iframe e' dentro #viewer, elementFromPoint e'
+        // gia' relativo al documento iframe; per il menu servono coords pagina:
+        // touch/contextmenu forniscono clientX/Y pagina -> uso diretto.
+        ctxPending = { contents: contents, el: el, px: x, py: y };
+        showCtxMenu(x, y);
+      }
+      // Tasto destro / contextmenu nativo: solo mobile viene soppresso e
+      // sostituito dal nostro menu. Listener in capture + stopImmediate per
+      // battere eventuali handler di epub.js.
+      doc.addEventListener("contextmenu", function (e) {
+        if (!isMobileDevice()) return; // desktop: lascia il menu del browser
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+        var x = (typeof e.clientX === "number") ? e.clientX : window.innerWidth / 2;
+        var y = (typeof e.clientY === "number") ? e.clientY : window.innerHeight / 2;
+        fire(x, y);
+      }, true);
+      // Long-press touch: timer passive (mai preventDefault qui: romperebbe
+      // handleSwipe). Si cancella su move/end/scroll.
+      doc.addEventListener("touchstart", function (e) {
+        if (!isMobileDevice()) return;
+        if (!e.touches || e.touches.length !== 1) return;
+        if (inlineEditor.classList.contains("open")) return;
+        lpFired = false;
+        lpX = e.touches[0].clientX; lpY = e.touches[0].clientY;
+        if (lpTimer) clearTimeout(lpTimer);
+        lpTimer = setTimeout(function () { fire(lpX, lpY); }, 550);
+      }, { passive: true, capture: true });
+      ["touchmove", "touchend", "touchcancel"].forEach(function (t) {
+        doc.addEventListener(t, function (e) {
+          if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+          // Se il long-press ha gia' aperto il menu, il touchend del dito
+          // non deve propagare click all'editor in-context.
+          if (lpFired && (t === "touchend" || t === "touchcancel")) {
+            lpFired = false;
+            try { e.stopPropagation(); } catch (err) {}
+          }
+        }, { passive: true, capture: true });
+      });
+    }
+    // Voci del menu: chiudono il menu, ripristinano la selezione, agiscono.
+    document.getElementById("ctxEdit").addEventListener("click", function () {
+      var p = ctxPending; hideCtxMenu();
+      if (!p || !p.contents) return;
+      var el = p.el;
+      if (!el && p.contents.document && p.contents.document.__lastSelRange) {
+        try { el = inlineBlockFrom(p.contents.document.__lastSelRange.startContainer); } catch (e) {}
+      }
+      if (!el) { setStatus("Tocca prima un paragrafo."); return; }
+      openInlineEditor(p.contents, el, { clientX: p.px, clientY: p.py }, true);
+      ctxPending = null;
+    });
+    document.getElementById("ctxHl").addEventListener("click", function () {
+      hideCtxMenu(); restoreCtxSelection(); addNoteFromSelection(); ctxPending = null;
+    });
+    document.getElementById("ctxNote").addEventListener("click", function () {
+      hideCtxMenu(); restoreCtxSelection(); addTextNote(); ctxPending = null;
+    });
+    // Tap fuori dal menu lo chiude (senza aprire l'editor sotto).
+    document.addEventListener("pointerdown", function (e) {
+      var m = ctxMenuEl();
+      if (m && m.classList.contains("open") && !m.contains(e.target)) hideCtxMenu();
+    }, true);
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") hideCtxMenu();
+    });
     function addNoteFromSelection() {
       if (!rendition) { setStatus("Nessun libro aperto."); return; }
       var contents = rendition.getContents();
