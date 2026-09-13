@@ -796,6 +796,30 @@
       max-width: 78vw;
     }
     #ctxMenu.open { display: block; }
+    /* Thin draggable top edge: lets the user slide the menu away to
+       uncover the selected text underneath. Only this strip starts a
+       drag (touch-action:none); the rest of the menu keeps
+       touch-action:manipulation for plain taps. */
+    #ctxDrag {
+      margin: -6px -6px 4px -6px;
+      padding: 8px 0 6px 0;
+      border-top: 3px solid #5a7fb0;
+      border-radius: 10px 10px 0 0;
+      cursor: move;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #ctxDrag::after {
+      content: "";
+      display: block;
+      width: 44px;
+      height: 4px;
+      margin: 0 auto;
+      border-radius: 2px;
+      background: #888;
+    }
+    #ctxDrag:active::after { background: #5a7fb0; }
     #ctxMenu button {
       display: flex;
       align-items: center;
@@ -813,6 +837,25 @@
     }
     #ctxMenu button:active { background: #5a7fb0; color: #fff; }
     #ctxMenu button:disabled { opacity: .4; }
+    /* Word-by-word expansion row: 4 buttons (start-/start+/end-/end+).
+       Stays inside #ctxMenu so outside-tap logic keeps working. */
+    #ctxExpand {
+      display: flex;
+      gap: 4px;
+      padding: 2px 2px 6px 2px;
+    }
+    #ctxExpand button {
+      display: block;
+      flex: 1 1 0;
+      width: auto;
+      text-align: center;
+      justify-content: center;
+      font-size: 14px;
+      padding: 10px 0;
+      background: #3a3a3a;
+      border-radius: 6px;
+      touch-action: manipulation;
+    }
 
     /* Search highlight marks - style injected into iframe */
     /* These are fallback styles, main styles are injected via JS */
@@ -833,6 +876,13 @@
 
   <!-- Menu contestuale mobile: long-press / tasto destro -> Edit / Evidenzia / Nota -->
   <div id="ctxMenu" role="menu" aria-hidden="true">
+    <div id="ctxDrag" title="Drag to move" aria-hidden="true"></div>
+    <div id="ctxExpand" role="group" aria-label="Expand selection">
+      <button id="ctxStartMinus" title="Extend start one word left">S−</button>
+      <button id="ctxStartPlus" title="Shrink start one word right">S+</button>
+      <button id="ctxEndMinus" title="Shrink end one word left">E−</button>
+      <button id="ctxEndPlus" title="Extend end one word right">E+</button>
+    </div>
     <button id="ctxEdit" role="menuitem">✏️ Modifica</button>
     <button id="ctxHl" role="menuitem">🟡 Evidenzia</button>
     <button id="ctxNote" role="menuitem">📝 Nota</button>
@@ -1505,6 +1555,9 @@
       viewer.addEventListener("touchcancel", function () { fbX = null; }, { passive: true });
       function handleSwipe(t, sx, sy, st) {
         if (!t) return;
+        // Swipe guard: taps/drags on the open ctx menu (incl. the 4 expand
+        // buttons) must never turn the page.
+        try { if (ctxMenuOpen()) return; } catch (e) {}
         var dx = t.clientX - sx;
         var dy = t.clientY - sy;
         var dt = performance.now() - st;
@@ -2489,20 +2542,197 @@
       if (!m) return;
       m.classList.remove("open");
       m.setAttribute("aria-hidden", "true");
+      // Reset expand buttons so a reopened menu never shows stale state.
+      try { ctxRefreshExpandState(); } catch (e) {}
+    }
+    // ---- Multi-word expansion (software selection, DOM untouched) ----
+    // The canonical range lives in ctxPending.range (+ mirror in
+    // doc.__lastSelRange). These helpers move one boundary by one word
+    // inside the boundary's own block (v1: no cross-block expansion),
+    // then repaint the overlay. The native selection stays collapsed so
+    // Android never reopens the Translate/Copy/Share ActionMode.
+    // Word rule: letters/digits are word chars, apostrophe (', \u2019)
+    // stays inside a word, hyphen/dashes split words.
+    function ctxIsWordChar(ch) {
+      if (!ch) return false;
+      if (ch === "'" || ch === "\u2019" || ch === "\u02BC") return true;
+      try { return /[\p{L}\p{N}]/u.test(ch); } catch (e) {
+        return /[A-Za-z0-9\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF]/.test(ch);
+      }
+    }
+    function ctxTextNodesIn(block) {
+      var out = [];
+      if (!block) return out;
+      var doc = block.ownerDocument;
+      var walker = null;
+      try {
+        walker = doc.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
+          acceptNode: function (n) {
+            try {
+              var p = n.parentNode;
+              while (p && p !== block) {
+                var tag = ((p.localName || p.tagName) || "").toLowerCase();
+                if (tag === "script" || tag === "style" || tag === "noscript")
+                  return NodeFilter.FILTER_REJECT;
+                p = p.parentNode;
+              }
+            } catch (e) {}
+            if (!n.nodeValue || !n.nodeValue.length) return NodeFilter.FILTER_SKIP;
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        });
+      } catch (e) { return out; }
+      var n = null;
+      try { while ((n = walker.nextNode())) out.push(n); } catch (e) {}
+      return out;
+    }
+    // Map a global offset (over the concatenated block text) back to a
+    // {node, offset} pair. Returns null when out of range.
+    function ctxNodeForGlobal(nodes, cum, total, g) {
+      if (g < 0 || g > total) return null;
+      for (var i = 0; i < nodes.length; i++) {
+        var start = cum[i], end = start + (nodes[i].nodeValue || "").length;
+        if (g <= end || i === nodes.length - 1) {
+          return { node: nodes[i],
+            offset: Math.max(0, Math.min(g - start, (nodes[i].nodeValue || "").length)) };
+        }
+      }
+      return null;
+    }
+    // One-word step over a plain string. `from` is the boundary offset.
+    // "growEnd" skips separators forward then consumes a word;
+    // "growStart" skips separators backward then consumes a word;
+    // "shrinkStart" consumes the current word then skips separators;
+    // "shrinkEnd" skips separators backward then consumes a word.
+    // Returns the new offset, or -1 when no word is found.
+    function ctxWordStep(text, from, kind) {
+      var n = text.length, j = Math.max(0, Math.min(from, n));
+      function isW(c) { return ctxIsWordChar(c); }
+      if (kind === "growEnd") {
+        while (j < n && !isW(text[j])) j++;      // skip separators/whitespace
+        var s = j;
+        while (j < n && isW(text[j])) j++;       // consume the word
+        return (j > s) ? j : -1;
+      }
+      if (kind === "growStart") {
+        var gb = j;
+        while (gb > 0 && !isW(text[gb - 1])) gb--;  // skip separators backward
+        var ge = gb;
+        while (gb > 0 && isW(text[gb - 1])) gb--;   // consume word backward
+        return (gb < ge) ? gb : -1;
+      }
+      if (kind === "shrinkStart") {
+        var k = j;
+        while (k < n && isW(text[k])) k++;       // consume current word
+        while (k < n && !isW(text[k])) k++;      // skip to next word start
+        // When sitting on separators already, just jump to next word.
+        if (k === j) { while (k < n && !isW(text[k])) k++; }
+        return (k > j && k <= n) ? k : -1;
+      }
+      // shrinkEnd
+      var b = j;
+      while (b > 0 && !isW(text[b - 1])) b--;    // skip separators backward
+      var e = b;
+      while (b > 0 && isW(text[b - 1])) b--;     // consume word backward
+      return (b < e) ? b : -1;
+    }
+    // Move one boundary of ctxPending.range by one word.
+    // side: "start" | "end"; dir: -1 (left) | +1 (right).
+    // No-op with setStatus() when the walker fails; menu stays open.
+    function ctxExpandRange(side, dir) {
+      try {
+        var d = ctxPending && ctxPending.contents && ctxPending.contents.document;
+        if (!d || !ctxPending || !ctxPending.range) { setStatus("No selection to expand."); return false; }
+        var range = ctxPending.range.cloneRange();
+        var bNode = (side === "start") ? range.startContainer : range.endContainer;
+        var bOff = (side === "start") ? range.startOffset : range.endOffset;
+        // v1: expansion stays inside the moving boundary's block.
+        var block = null;
+        try { block = inlineBlockFrom(bNode) || d.body; } catch (e) { block = d.body; }
+        if (!block) { setStatus("No expandable block."); return false; }
+        var nodes = ctxTextNodesIn(block);
+        if (!nodes.length) { setStatus("No expandable text."); return false; }
+        var texts = [], cum = [], total = 0, i;
+        for (i = 0; i < nodes.length; i++) {
+          texts.push(nodes[i].nodeValue || "");
+          cum.push(total);
+          total += (nodes[i].nodeValue || "").length;
+        }
+        var full = texts.join("");
+        // Global offsets of both boundaries (text-node fast path; element
+        // boundary fallback via a measuring temp range).
+        function globalOf(node, off) {
+          for (var k = 0; k < nodes.length; k++) {
+            if (nodes[k] === node)
+              return cum[k] + Math.max(0, Math.min(off, (nodes[k].nodeValue || "").length));
+          }
+          try {
+            var tmp = d.createRange();
+            tmp.selectNodeContents(block);
+            tmp.setEnd(node, off);
+            return (tmp.toString() || "").length;
+          } catch (e) { return -1; }
+        }
+        var gStart = globalOf(range.startContainer, range.startOffset);
+        var gEnd = globalOf(range.endContainer, range.endOffset);
+        if (gStart < 0 || gEnd < 0 || gEnd <= gStart) { setStatus("No selection to expand."); return false; }
+        var kind = (side === "end")
+          ? (dir > 0 ? "growEnd" : "shrinkEnd")
+          : (dir > 0 ? "shrinkStart" : "growStart");
+        var ng = ctxWordStep(full, (side === "end") ? gEnd : gStart, kind);
+        if (ng < 0) { setStatus("Nothing more to expand."); return false; }
+        // Keep the range non-collapsed and ordered.
+        if (side === "end" && ng <= gStart) { setStatus("Nothing more to shrink."); return false; }
+        if (side === "start" && ng >= gEnd) { setStatus("Nothing more to shrink."); return false; }
+        var hit = ctxNodeForGlobal(nodes, cum, total, ng);
+        if (!hit) { setStatus("Nothing more to expand."); return false; }
+        var next = range.cloneRange();
+        try {
+          if (side === "end") next.setEnd(hit.node, hit.offset);
+          else next.setStart(hit.node, hit.offset);
+        } catch (e) { setStatus("Cannot expand here."); return false; }
+        if (next.collapsed) { setStatus("Nothing more to shrink."); return false; }
+        // Sanity: the merged range must stay inside <body>.
+        try {
+          var ca = next.commonAncestorContainer;
+          var inside = false, p = (ca && ca.nodeType === 1) ? ca : (ca && ca.parentNode);
+          while (p) { if (p === d.body) { inside = true; break; } p = p.parentNode; }
+          if (!inside) { setStatus("Cannot expand here."); return false; }
+        } catch (e) { setStatus("Cannot expand here."); return false; }
+        ctxPending.range = next.cloneRange();
+        try { d.__lastSelRange = next.cloneRange(); } catch (e) {}
+        paintCtxSoftSel(d, next);
+        ctxRefreshExpandState();
+        return true;
+      } catch (e) { setStatus("Cannot expand here."); return false; }
+    }
+    // Enable/disable the 4 expand buttons + Evidenzia/Nota from the
+    // canonical ctxPending.range (native selection stays collapsed).
+    function ctxRefreshExpandState() {
+      var has = !!(ctxPending && ctxPending.range && !ctxPending.range.collapsed);
+      ["ctxStartMinus", "ctxStartPlus", "ctxEndMinus", "ctxEndPlus"].forEach(function (id) {
+        var b = document.getElementById(id);
+        if (b) b.disabled = !has;
+      });
+      var hl = document.getElementById("ctxHl"), nt = document.getElementById("ctxNote");
+      if (hl) hl.disabled = !has;
+      if (nt) nt.disabled = !has;
     }
     function showCtxMenu(x, y) {
       var m = ctxMenuEl();
       if (!m) return;
-      // Abilita Evidenzia/Nota solo se c'e' una selezione non collassata
-      var hasSel = false;
+      // Enable Evidenzia/Nota + expand buttons from the canonical
+      // ctxPending.range (native selection is intentionally collapsed).
+      var hasSel = !!(ctxPending && ctxPending.range && !ctxPending.range.collapsed);
       try {
         var d = ctxPending && ctxPending.contents && ctxPending.contents.document;
         var s = d && d.getSelection ? d.getSelection() : null;
-        if (s && !s.isCollapsed && s.rangeCount) hasSel = true;
-        else if (d && d.__lastSelRange) hasSel = true;
+        if (!hasSel && s && !s.isCollapsed && s.rangeCount) hasSel = true;
+        else if (!hasSel && d && d.__lastSelRange) hasSel = true;
       } catch (e) {}
       document.getElementById("ctxHl").disabled = !hasSel;
       document.getElementById("ctxNote").disabled = !hasSel;
+      ctxRefreshExpandState();
       m.classList.add("open");
       m.setAttribute("aria-hidden", "false");
       var mw = 220, mh = 170;
@@ -2774,6 +3004,53 @@
         if (s && !s.isCollapsed) s.removeAllRanges();
       } catch (e) {}
     }
+    // Expand buttons: adjust the software range by one word per tap.
+    // The menu stays OPEN (unlike Evidenzia/Nota which close it).
+    [["ctxStartMinus", "start", -1], ["ctxStartPlus", "start", 1],
+     ["ctxEndMinus", "end", -1], ["ctxEndPlus", "end", 1]].forEach(function (cfg) {
+      var b = document.getElementById(cfg[0]);
+      if (!b) return;
+      b.addEventListener("click", function (e) {
+        try { e.stopPropagation(); } catch (err) {}
+        ctxExpandRange(cfg[1], cfg[2]);
+      });
+    });
+    // Draggable menu: pointer drag on the thin #ctxDrag strip moves the
+    // whole #ctxMenu (clamped to the viewport) so the user can uncover
+    // the selected text underneath. Pointer Events cover touch + mouse;
+    // touch-action:none lives on the strip only, taps elsewhere are intact.
+    (function bindCtxMenuDrag() {
+      var grip = document.getElementById("ctxDrag");
+      if (!grip || grip._dragBound) return;
+      grip._dragBound = true;
+      var sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
+      grip.addEventListener("pointerdown", function (e) {
+        var m = ctxMenuEl();
+        if (!m || !m.classList.contains("open")) return;
+        dragging = true;
+        sx = e.clientX; sy = e.clientY;
+        var r = m.getBoundingClientRect();
+        ox = r.left; oy = r.top;
+        try { grip.setPointerCapture(e.pointerId); } catch (err) {}
+        try { e.preventDefault(); } catch (err) {}
+        try { e.stopPropagation(); } catch (err) {}
+      });
+      grip.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var m = ctxMenuEl();
+        if (!m) return;
+        var mw = m.offsetWidth || 220, mh = m.offsetHeight || 170;
+        var nx = ox + (e.clientX - sx), ny = oy + (e.clientY - sy);
+        nx = Math.max(8, Math.min(nx, window.innerWidth - mw - 8));
+        ny = Math.max(8, Math.min(ny, window.innerHeight - mh - 8));
+        m.style.left = nx + "px";
+        m.style.top = ny + "px";
+        try { e.preventDefault(); } catch (err) {}
+      });
+      function endDrag() { dragging = false; }
+      grip.addEventListener("pointerup", endDrag);
+      grip.addEventListener("pointercancel", endDrag);
+    })();
     document.getElementById("ctxHl").addEventListener("click", function () {
       hideCtxMenu(); restoreCtxSelection(); addNoteFromSelection();
       collapseCtxSelection(); ctxPending = null;
@@ -2810,7 +3087,7 @@
         if (!cfi) { setStatus("Selezione non convertibile in CFI."); return; }
         // TOGGLE: la selezione coincide/si sovrappone a un highlight esistente -> rimuovilo
         // (le note testuali kind:"note" sono indipendenti: vengono ignorate qui)
-        var overlapped = findOverlappingNotes(c, range, cfi, "hl");
+        var overlapped = findOverlappingNotes(c, range, cfi, "hl", text);
         if (overlapped.length) { removeNoteHighlights(overlapped); try { sel.collapseToEnd(); } catch (e) {} return; }
         if (appliedCfis["hl:" + cfi]) { setStatus("Gi\u00e0 evidenziato."); try { sel.collapseToEnd(); } catch (e) {} return; }
         try { rendition.annotations.highlight(cfi, {}, null, "epub-note-hl", NOTE_STYLE); }
@@ -2832,9 +3109,16 @@
       }
       setStatus("Seleziona prima del testo da evidenziare.");
     }
-    // Ritorna i CFI delle note esistenti che si sovrappongono alla selezione.
-    // Confronto prima per stringa esatta, poi per intersezione di Range DOM.
-    function findOverlappingNotes(contents, range, cfi, kind) {
+    // Returns the CFIs of stored notes overlapping the selection.
+    // Three-stage match: exact CFI string, then DOM Range intersection,
+    // then normalized-text equality (same chapter). The text fallback
+    // covers reselections whose CFI drifts by a few character offsets
+    // (e.g. touch expansion including surrounding spaces differently),
+    // which previously stacked a duplicate highlight instead of toggling off.
+    function ctxNormText(t) {
+      try { return (t || "").replace(/\s+/g, " ").trim(); } catch (e) { return ""; }
+    }
+    function findOverlappingNotes(contents, range, cfi, kind, selText) {
       var key = null;
       try { key = bookKey(); } catch (e) { return []; }
       var notes = noteCache[key] || [];
@@ -2857,6 +3141,20 @@
           var after = range.compareBoundaryPoints(Range.START_TO_END, stored) >= 0;
           if (!before && !after) hit.push(n.cfi);
         } catch (e) {}
+      }
+      if (hit.length) return hit;
+      // Text fallback: same words reseelected with a drifted CFI.
+      var norm = ctxNormText(selText != null ? selText
+        : (function () { try { return range.toString(); } catch (e) { return ""; } })());
+      if (!norm) return hit;
+      for (i = 0; i < notes.length; i++) {
+        n = notes[i];
+        if (!n || !n.cfi || !n.text) continue;
+        if (kind && ((n.kind || "hl") !== kind)) continue;
+        // Scope to the same chapter to avoid matching an identical
+        // sentence repeated elsewhere in the book.
+        if (n.href && currentHref && n.href !== currentHref) continue;
+        if (ctxNormText(n.text) === norm) hit.push(n.cfi);
       }
       return hit;
     }
@@ -2920,7 +3218,7 @@
         try { cfi = c.cfiFromRange(range) + ""; } catch (e) { cfi = null; }
         if (!cfi) { setStatus("Selezione non convertibile in CFI."); return; }
         // Se la selezione tocca una nota esistente -> apri il popover, non duplicare
-        var overlapped = findOverlappingNotes(c, range, cfi, "note");
+        var overlapped = findOverlappingNotes(c, range, cfi, "note", text);
         try { sel.collapseToEnd(); } catch (e) {}
         if (overlapped.length) { openNoteEditor(overlapped[0]); return; }
         var key = bookKey();

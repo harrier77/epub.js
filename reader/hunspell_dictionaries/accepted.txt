@@ -253,3 +253,6 @@ isaiah
 berlin
 hayek
 tertius
+duns
+fichte
+schelling
