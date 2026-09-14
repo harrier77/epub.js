@@ -2467,7 +2467,12 @@
         // Aggiunto anche Ctrl+Shift+E (senza Alt) per bypassare del tutto AltGr.
         var isHl = (mod && e.altKey && (k === "e" || k === "\u20ac")) || (e.code === "KeyE" && mod && (e.altKey || e.shiftKey || k === "\u20ac" || k === "e"));
         var isNt = (mod && e.altKey && (k === "n")) || (e.code === "KeyN" && mod && (e.altKey || e.shiftKey));
-        if (isHl) {
+        var isEditFrag = (mod && !e.altKey && !e.shiftKey && k === "m") || (e.code === "KeyM" && mod && !e.altKey && !e.shiftKey);
+        if (isEditFrag) {
+          e.preventDefault();
+          e.stopPropagation();
+          try { editSelectedFragment(); } catch (err) {}
+        } else if (isHl) {
           e.preventDefault();
           e.stopPropagation();
           addNoteFromSelection();
@@ -2486,6 +2491,38 @@
     // (giallo), addTextNote (nota blu). La selezione e' preservata via
     // doc.__lastSelRange (snapshot di bindInlineEdit) e ripristinata prima
     // dell'azione cosi' il CFI resta corretto anche se il menu l'ha collassata.
+    // Ctrl+M: apri l'edit del frammento selezionato (come voce
+    // "Modifica" del menu contestuale). Stesso path: blocco contenitore
+    // via inlineBlockFrom + openInlineEditor in modalita' frammento.
+    function editSelectedFragment() {
+      if (!rendition) { setStatus("Nessun libro aperto."); return; }
+      var contents = rendition.getContents();
+      if (!contents) return;
+      for (var i = 0; i < contents.length; i++) {
+        var c = contents[i];
+        if (!c || !c.document) continue;
+        var sel = null;
+        try { sel = c.document.getSelection(); } catch (e) { continue; }
+        var range = null;
+        if (sel && !sel.isCollapsed && sel.rangeCount) {
+          range = sel.getRangeAt(0);
+        } else if (c.document.__lastSelRange) {
+          range = c.document.__lastSelRange;
+        }
+        if (!range) continue;
+        var el = null;
+        try { el = inlineBlockFrom(range.startContainer); } catch (e) {}
+        if (!el) continue;
+        var r = null;
+        try { r = range.getBoundingClientRect ? range.getBoundingClientRect() : null; } catch (e) {}
+        openInlineEditor(c, el,
+          { clientX: (r && (r.left + r.width / 2)) || undefined,
+            clientY: (r && (r.top + r.height / 2)) || undefined,
+            target: range.startContainer }, true);
+        return;
+      }
+      setStatus("Seleziona prima il frammento da modificare.");
+    }
     // ==================================================================
     var ctxMenu = null, ctxPending = null; // {contents, el, px, py, ix, iy, target, range, fr}
     var ctxEditAt = 0;
@@ -3902,10 +3939,49 @@
       // Dentro gli editor (full-chapter o popover in-context) le frecce
       // muovono il cursore, non sfogliano
       var t = e.target;
+      // Ctrl+S globale con popover aperto: salva anche se il focus e'
+      // su un bottone del popover (non dentro la textarea)
+      if ((e.ctrlKey || e.metaKey) && !e.altKey &&
+          (e.key === "s" || e.key === "S")) {
+        var ie = document.getElementById("inlineEditor");
+        if (ie && ie.classList.contains("open")) {
+          e.preventDefault();
+          e.stopPropagation();
+          var sv0 = document.getElementById("ieSave");
+          if (sv0 && !sv0.disabled) sv0.click();
+          return;
+        }
+      }
       var isFrag = t && t.classList && t.classList.contains("ieFrag");
       var isEditor = isFrag ||
         (t && (t.id === "codeEditor" || t.id === "ieCode" || t.id === "metaCode"));
+      // Ctrl+M fuori dall'iframe (focus su toolbar/body): stesso edit frammento
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey &&
+          (e.key === "m" || e.key === "M" || e.code === "KeyM")) {
+        if (!isEditor) {
+          e.preventDefault();
+          e.stopPropagation();
+          try { editSelectedFragment(); } catch (err) {}
+          return;
+        }
+      }
       if (isEditor) {
+        if ((e.ctrlKey || e.metaKey) && !e.altKey &&
+            (e.key === "s" || e.key === "S")) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (isFrag || t.id === "ieCode") {
+            var sv = document.getElementById("ieSave");
+            if (sv && !sv.disabled) sv.click();
+          } else if (t.id === "codeEditor") {
+            var sb = document.getElementById("saveBtn");
+            if (sb && !sb.disabled) sb.click();
+          } else if (t.id === "metaCode") {
+            var ms = document.getElementById("metaSave");
+            if (ms && !ms.disabled) ms.click();
+          }
+          return;
+        }
         if (e.ctrlKey && !e.altKey && !e.metaKey &&
             (e.key === "i" || e.key === "I" || e.key === "\u00ec" || e.key === "\u00cc")) {
           if (t.id === "codeEditor" || t.id === "ieCode") {
