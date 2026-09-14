@@ -2458,11 +2458,20 @@
       if (!doc || doc._noteKeysBound) return;
       doc._noteKeysBound = true;
       doc.addEventListener("keydown", function (e) {
-        if ((e.ctrlKey || e.metaKey) && e.altKey && String(e.key || "").toLowerCase() === "e") {
+        // Su Windows Ctrl+Alt = AltGr: e.key puo' arrivare come "\u20ac" invece di "e".
+        // e.code resta "KeyE"/"KeyN" indipendente da maiuscole/minuscole e layout: usalo come fallback.
+        var k = String(e.key || "").toLowerCase();
+        var mod = (e.ctrlKey || e.metaKey);
+        // AltGr (Ctrl+Alt su tastiera IT) falsifica ctrlKey/altKey e trasforma "e" in "\u20ac":
+        // basta code==KeyE + un modificatore (ctrl/alt/meta/shift) per matchare senza Shift.
+        // Aggiunto anche Ctrl+Shift+E (senza Alt) per bypassare del tutto AltGr.
+        var isHl = (mod && e.altKey && (k === "e" || k === "\u20ac")) || (e.code === "KeyE" && mod && (e.altKey || e.shiftKey || k === "\u20ac" || k === "e"));
+        var isNt = (mod && e.altKey && (k === "n")) || (e.code === "KeyN" && mod && (e.altKey || e.shiftKey));
+        if (isHl) {
           e.preventDefault();
           e.stopPropagation();
           addNoteFromSelection();
-        } else if ((e.ctrlKey || e.metaKey) && e.altKey && String(e.key || "").toLowerCase() === "n") {
+        } else if (isNt) {
           e.preventDefault();
           e.stopPropagation();
           addTextNote();
@@ -3387,11 +3396,15 @@
       }
     } catch (e) {}
     document.addEventListener("keydown", function (e) {
-      if ((e.ctrlKey || e.metaKey) && e.altKey && String(e.key || "").toLowerCase() === "e") {
+      var k2 = String(e.key || "").toLowerCase();
+      var mod2 = (e.ctrlKey || e.metaKey);
+      var isHl2 = (mod2 && e.altKey && (k2 === "e" || k2 === "\u20ac")) || (e.code === "KeyE" && mod2 && (e.altKey || e.shiftKey || k2 === "\u20ac" || k2 === "e"));
+      var isNt2 = (mod2 && e.altKey && (k2 === "n")) || (e.code === "KeyN" && mod2 && (e.altKey || e.shiftKey));
+      if (isHl2) {
         if (!rendition) return;
         e.preventDefault();
         addNoteFromSelection();
-      } else if ((e.ctrlKey || e.metaKey) && e.altKey && String(e.key || "").toLowerCase() === "n") {
+      } else if (isNt2) {
         if (!rendition) return;
         e.preventDefault();
         addTextNote();
