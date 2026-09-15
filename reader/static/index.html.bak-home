@@ -296,43 +296,6 @@
       overscroll-behavior: none; overscroll-behavior-x: none; /* anti back-gesture, non cancella eventi */
     }
 
-    /* Home libreria (pagina iniziale al posto del primo libro) */
-    #homePage {
-      height: 100%;
-      overflow-y: auto;
-      padding: 40px 32px;
-      box-sizing: border-box;
-      background: #fafafa;
-      color: #222;
-    }
-    #homePage h1 { font-size: 26px; margin: 0 0 6px 0; }
-    #homePage p.homeSub { color: #666; margin: 0 0 24px 0; }
-    .homeGrid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 14px;
-    }
-    .homeCard {
-      background: #fff;
-      border: 1px solid #ddd;
-      border-radius: 8px;
-      padding: 14px 16px;
-      cursor: pointer;
-    }
-    .homeCard:hover { border-color: #888; box-shadow: 0 2px 10px rgba(0,0,0,.12); }
-    .homeCard .homeIcon { font-size: 28px; }
-    .homeCard .homeTitle { font-weight: bold; margin: 8px 0 4px 0; }
-    .homeCard .homeMeta { font-size: 12px; color: #777; }
-    .homeCard .homeBadge {
-      display: inline-block;
-      font-size: 11px;
-      background: #eee;
-      border-radius: 4px;
-      padding: 1px 6px;
-      margin-top: 8px;
-      color: #555;
-    }
-
     /* Editor HTML */
     #editorPanel {
       display: none;
@@ -928,7 +891,6 @@
   <div id="toolbarShowZone" title="Mostra toolbar">&#9662;</div>
   <div id="toolbar">
     <button id="libraryToggle" title="Libreria">📚</button>
-    <button id="homeBtn" title="Home libreria">⌂</button>
     <button id="filesToggle" title="File inclusi nell'EPUB">📂</button>
     <button id="tocToggle" title="Indice dei capitoli (TOC)" disabled>☰</button>
     <button id="prev" title="Pagina precedente" disabled>‹</button>
@@ -1172,10 +1134,6 @@
       else openLibrary();
     });
     document.getElementById("libraryClose").addEventListener("click", closeLibrary);
-    // ⌂ Home: ricarica la libreria e mostra la pagina iniziale con i libri
-    document.getElementById("homeBtn").addEventListener("click", function () {
-      loadBookList();
-    });
 
     function highlightCurrentBook() {
       var items = bookListEl.querySelectorAll(".bookItem");
@@ -1190,64 +1148,6 @@
       return bytes + " B";
     }
 
-    // --- Home libreria: pagina iniziale con le schede dei libri (stessi
-    // dati della sidebar). Sostituisce l'apertura automatica di books[0].
-    function showHome(books) {
-      closeInlineEditor();
-      try { closeNoteEditor(); } catch (e) {}
-      closeMetaEditor();
-      try { closeCssEditor(); } catch (e) {}
-      closeBuildReport();
-      closeSearch();
-      if (book) {
-        try { book.destroy(); } catch (err) {}
-        book = null;
-      }
-      rendition = null;
-      currentBookUrl = null;
-      currentHref = null;
-      viewer.innerHTML = "";
-      var home = document.createElement("div");
-      home.id = "homePage";
-      var h1 = document.createElement("h1");
-      h1.textContent = "\uD83D\uDCDA Libreria";
-      home.appendChild(h1);
-      var sub = document.createElement("p");
-      sub.className = "homeSub";
-      sub.textContent = "Scegli un libro da leggere o modificare.";
-      home.appendChild(sub);
-      var grid = document.createElement("div");
-      grid.className = "homeGrid";
-      (books || []).forEach(function (b) {
-        var card = document.createElement("div");
-        card.className = "homeCard";
-        card.addEventListener("click", function () { openBook(b.url); });
-        var icon = document.createElement("div");
-        icon.className = "homeIcon";
-        icon.textContent = b.type === "folder" ? "\uD83D\uDCC1" : "\uD83D\uDCD6";
-        card.appendChild(icon);
-        var t = document.createElement("div");
-        t.className = "homeTitle";
-        t.textContent = b.title || b.name;
-        card.appendChild(t);
-        var m = document.createElement("div");
-        m.className = "homeMeta";
-        m.textContent = formatSize(b.size) + " \u00B7 " + b.name;
-        card.appendChild(m);
-        if (b.type === "folder" || b.type === "extepub") {
-          var badge = document.createElement("span");
-          badge.className = "homeBadge";
-          badge.textContent = b.type === "folder" ? "cartella esterna" : "epub esterno";
-          card.appendChild(badge);
-        }
-        grid.appendChild(card);
-      });
-      home.appendChild(grid);
-      viewer.appendChild(home);
-      highlightCurrentBook();
-      setStatus("Libreria");
-    }
-
     function loadBookList() {
       apiListBooks()
         .then(function (books) {
@@ -1257,7 +1157,6 @@
             empty.textContent = "Nessun libro trovato: metti dei file .epub in static/";
             empty.style.cssText = "color:#999;font-size:13px;padding:8px;";
             bookListEl.appendChild(empty);
-            showHome([]);
             return;
           }
           books.forEach(function (b) {
@@ -1287,8 +1186,8 @@
           });
           // evidenzia il libro attualmente aperto
           highlightCurrentBook();
-          // pagina iniziale con l'elenco dei libri (niente apertura automatica)
-          showHome(books);
+          // apre il primo libro della libreria all'avvio
+          openBook(books[0].url);
         })
         .catch(function (err) {
           setStatus("Errore nel caricamento della libreria: " + err);
@@ -1579,11 +1478,6 @@
       document.getElementById("reloadBtn").disabled = !isFolderBook();
       document.getElementById("metaEditBtn").disabled = !isFolderBook();
       document.getElementById("cssEditBtn").disabled = false;
-      // Via la home dal viewer (se presente) prima di montare il rendition
-      try {
-        var hp = document.getElementById("homePage");
-        if (hp && hp.parentNode) hp.parentNode.removeChild(hp);
-      } catch (e) {}
       rendition = book.renderTo("viewer", {
         width: "100%",
         height: "100%",
