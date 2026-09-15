@@ -4511,9 +4511,22 @@ class default_DefaultViewManager {
 
     if (this.isPaginated && this.settings.axis === "horizontal" && (!dir || dir === "ltr")) {
       this.scrollLeft = this.container.scrollLeft;
-      left = this.container.scrollLeft + this.container.offsetWidth + this.layout.delta;
+      // FIX (zoom + last partial column, e.g. at 150% zoom):
+      // 1) offsetWidth is in CSS px (unscaled layout units), while
+      //    scrollLeft/scrollWidth are in rendered px (scaled by the CSS
+      //    zoom applied to an ancestor, e.g. #viewer): derive the real
+      //    visible width via getBoundingClientRect.
+      // 2) the original check also added layout.delta, so when the unseen
+      //    remainder was smaller than one full column (last partial
+      //    column) it skipped straight to the next chapter. Now keep
+      //    scrolling while unseen content remains (1px tolerance for
+      //    sub-pixel rounding); scrollBy is clamped by the browser to
+      //    the maximum, so there is no overshoot.
+      var _zw = this.container.offsetWidth;
+      var _zr = _zw ? (this.container.getBoundingClientRect().width / _zw) || 1 : 1;
+      left = this.container.scrollLeft + _zw * _zr;
 
-      if (left <= this.container.scrollWidth) {
+      if (left < this.container.scrollWidth - 1) {
         this.scrollBy(this.layout.delta, 0, true);
       } else {
         next = this.views.last().section.next();
@@ -4540,7 +4553,11 @@ class default_DefaultViewManager {
       }
     } else if (this.isPaginated && this.settings.axis === "vertical") {
       this.scrollTop = this.container.scrollTop;
-      let top = this.container.scrollTop + this.container.offsetHeight;
+      // FIX (zoom): same CSS-px vs rendered-px mismatch as the LTR branch
+      // above, applied to the vertical axis.
+      let _zwV = this.container.offsetHeight;
+      let _zrV = _zwV ? (this.container.getBoundingClientRect().height / _zwV) || 1 : 1;
+      let top = this.container.scrollTop + _zwV * _zrV;
 
       if (top < this.container.scrollHeight) {
         this.scrollBy(0, this.layout.height, true);
@@ -4595,7 +4612,11 @@ class default_DefaultViewManager {
       this.scrollLeft = this.container.scrollLeft;
 
       if (this.settings.rtlScrollType === "default") {
-        left = this.container.scrollLeft + this.container.offsetWidth;
+        // FIX (zoom): same CSS-px vs rendered-px mismatch as the LTR
+        // branch of next().
+        var _zwR = this.container.offsetWidth;
+        var _zrR = _zwR ? (this.container.getBoundingClientRect().width / _zwR) || 1 : 1;
+        left = this.container.scrollLeft + _zwR * _zrR;
 
         if (left < this.container.scrollWidth) {
           this.scrollBy(-this.layout.delta, 0, true);
