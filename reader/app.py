@@ -21,10 +21,12 @@ ricompilare l'epub. Il pulsante "⟳ Ricarica" rilegge il capitolo corrente.
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import re
 import sys
+import threading
 import urllib.parse
 import urllib.request
 import zipfile
@@ -58,6 +60,8 @@ def _load_config():
     import configparser
 
     defaults_book_dir = r"..\translator\target"
+    defaults_module_dir = os.path.normpath(os.path.join(BASE_DIR, "..", "..", "dropbox"))
+    defaults_sync_dir = ""
 
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -69,6 +73,15 @@ def _load_config():
         if not config.has_option("paths", "book_dir"):
             config["paths"]["book_dir"] = defaults_book_dir
 
+        if not config.has_section("dropbox"):
+            config.add_section("dropbox")
+        if not config.has_option("dropbox", "module_dir"):
+            config["dropbox"]["module_dir"] = defaults_module_dir
+        if not config.has_option("dropbox", "sync_dir"):
+            config["dropbox"]["sync_dir"] = defaults_sync_dir
+        if not config.has_option("dropbox", "remote_dir"):
+            config["dropbox"]["remote_dir"] = "/"
+
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             config.write(f)
 
@@ -79,11 +92,25 @@ def _load_config():
             if p.strip()
         ]
 
+        dropbox_sync_dir = os.path.expanduser(
+            config["dropbox"].get("sync_dir", "").strip()
+        )
+
         return {"book_dir": os.path.expanduser(config["paths"].get("book_dir", "").strip()),
                 "epub_files": epub_files,
+                "dropbox_module_dir":
+                    os.path.expanduser(config["dropbox"].get("module_dir", "").strip()),
+                "dropbox_sync_dir": dropbox_sync_dir or None,
+                "dropbox_remote_dir":
+                    config["dropbox"].get("remote_dir", "").strip() or None,
                 "namespace": config}
     except Exception:  # in caso di errori cadiamo sui default iniettabili
-        return {"book_dir": defaults_book_dir, "epub_files": [], "namespace": None}
+        return {"book_dir": defaults_book_dir,
+                "epub_files": [],
+                "dropbox_module_dir": defaults_module_dir,
+                "dropbox_sync_dir": None,
+                "dropbox_remote_dir": "/",
+                "namespace": None}
 
 
 # Cartella esterna con un EPUB non impacchettato (output del translator).
@@ -93,6 +120,13 @@ def _load_config():
 CONFIG = _load_config()
 DEFAULT_BOOK_DIR = CONFIG["book_dir"]
 DEFAULT_EPUB_FILES = CONFIG["epub_files"]
+
+# Sincronizzazione Dropbox: la cartella con sync.py/dbx_auth.py e la cartella
+# locale da sincronizzare (in config.ini, sezione [dropbox]). override con
+# --dropbox-sync-dir per questa singola esecuzione.
+DROPBOX_MODULE_DIR = CONFIG.get("dropbox_module_dir") or None
+DROPBOX_SYNC_DIR = CONFIG.get("dropbox_sync_dir") or None
+DROPBOX_REMOTE_DIR = CONFIG.get("dropbox_remote_dir") or "/"
 
 SAMPLE_URL = "https://s3.amazonaws.com/epubjs/books/alice.epub"
 SAMPLE_FILE = os.path.join(STATIC_DIR, "book.epub")
@@ -465,6 +499,118 @@ def api_css_content():
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc))
 
+
+
+# --- Sincronizzazione Dropbox -------------------------------------------
+# Riutilizza direttamente sync.py e dbx_auth.py della cartella `dropbox`
+# (import: percorso da config.ini [dropbox] module_dir). Le funzioni vengono
+# eseguite in un thread di background, con un lock che impedisce sync multipli
+# e nessuna interazione da terminale (get_dbx(interactive=False): se manca il
+# token, l'errore arriva come risposta al frontend, senza prompt).
+_dropbox_sync_cache = {}  # module_dir -> modulo sync caricato (di<reference>__)
+
+
+def _get_dropbox_sync():
+    """Carica (una sola volta per cartella) dbx_auth e sync dalla module_dir."""
+    mod_dir = DROPBOX_MODULE_DIR
+    if not mod_dir or not os.path.isdir(mod_dir):
+        raise RuntimeError(
+            "Dropbox non configurato: module_dir non trovata (" + str(mod_dir) + ")"
+        )
+    key = os.path.realpath(mod_dir)
+    cached = _dropbox_sync_cache.get(key)
+    if cached is not None:
+        return cached
+
+    sys.path.insert(0, mod_dir)
+    try:
+        import dbx_auth  # noqa: F401  (necessario: sync.py lo importa)
+        import sync as dropbox_sync
+    finally:
+        try:
+            sys.path.remove(mod_dir)
+        except ValueError:
+            pass
+    _dropbox_sync_cache[key] = dropbox_sync
+    return dropbox_sync
+
+
+_dropbox_lock = threading.Lock()
+_dropbox_state = {
+    "running": False,
+    "mode": None,
+    "dry": False,
+    "log": [],
+    "result": None,
+    "sync_dir": None,  # cartella locale effettiva (risolta dal working-folder)
+}
+
+
+def _dropbox_worker(mode, dry):
+    """Esegue il sync in background e registra l'esito in _dropbox_state."""
+    log = []
+    try:
+        sync_mod = _get_dropbox_sync()
+        result = sync_mod.run_sync(
+            mode,
+            dry=dry,
+            local_dir=DROPBOX_SYNC_DIR or None,
+            remote_dir=DROPBOX_REMOTE_DIR,
+            progress=log.append,
+        )
+        outcome = {"ok": True, "result": result}
+        resolved_dir = DROPBOX_SYNC_DIR or sync_mod._resolve_local()
+    except Exception as exc:  # noqa: BLE001
+        outcome = {"ok": False, "error": str(exc)}
+        resolved_dir = None
+    finally:
+        with _dropbox_lock:
+            _dropbox_state["running"] = False
+            _dropbox_state["log"] = log
+            _dropbox_state["result"] = outcome
+            _dropbox_state["sync_dir"] = resolved_dir
+
+
+@app.route("/api/dropbox/status")
+def api_dropbox_status():
+    """Stato della sincronizzazione Dropbox (opzionale, poll dal frontend)."""
+    with _dropbox_lock:
+        return jsonify(
+            ok=True,
+            running=_dropbox_state["running"],
+            mode=_dropbox_state["mode"],
+            dry=_dropbox_state["dry"],
+            log=list(_dropbox_state["log"]),
+            result=_dropbox_state["result"],
+            sync_dir=_dropbox_state["sync_dir"] or DROPBOX_SYNC_DIR,
+        )
+
+
+@app.route("/api/dropbox/sync", methods=["POST"])
+def api_dropbox_sync():
+    """Avvia una sincronizzazione Dropbox in background.
+
+    Richiesta JSON: {"mode": "push"|"pull"|"both", "dry": false}.
+    Risposta: {"ok": true, "started": true}; l'esito si legge da
+    /api/dropbox/status. Un sync gia' in corso rifiuta il secondo avvio.
+    """
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get("mode", "both"))
+    if mode not in ("push", "pull", "both"):
+        return jsonify(ok=False, error="Modalita' non valida: " + mode), 400
+    dry = bool(data.get("dry", False))
+
+    with _dropbox_lock:
+        if _dropbox_state["running"]:
+            return jsonify(ok=False, error="Una sincronizzazione e' gia' in corso")
+        _dropbox_state["running"] = True
+        _dropbox_state["mode"] = mode
+        _dropbox_state["dry"] = dry
+        _dropbox_state["log"] = []
+        _dropbox_state["result"] = None
+
+    threading.Thread(target=_dropbox_worker, args=(mode, dry), daemon=True).start()
+    return jsonify(ok=True, started=True)
 
 
 def _valid_book_key(book):
@@ -1035,6 +1181,7 @@ def ensure_sample_book():
 
 
 def main():
+    global BOOK_DIR, EPUB_FILES, DROPBOX_SYNC_DIR
     parser = argparse.ArgumentParser(description="Lettore EPUB con epub.js")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
@@ -1048,10 +1195,16 @@ def main():
             "Default: %(default)s"
         ),
     )
+    parser.add_argument(
+        "--dropbox-sync-dir",
+        default=DROPBOX_SYNC_DIR,
+        help="Cartella locale sincronizzata con Dropbox (config.ini [dropbox]). "
+             "Default: %(default)s",
+    )
     args = parser.parse_args()
 
-    global BOOK_DIR, EPUB_FILES
     BOOK_DIR = (args.book_dir or "").strip() or None
+    DROPBOX_SYNC_DIR = (args.dropbox_sync_dir or "").strip() or None
     EPUB_FILES = DEFAULT_EPUB_FILES if DEFAULT_EPUB_FILES else None
     if BOOK_DIR:
         if os.path.isdir(BOOK_DIR):
