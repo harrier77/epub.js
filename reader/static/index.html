@@ -1367,11 +1367,25 @@
     }
 
     // Chiave libro per il salvataggio: per il libro-cartella il backend (Nim
-    // e Flask) riconosce la chiave "ext"; per i .epub il basename.
+    // e Flask) riconosce la chiave "ext"; per gli epub esterni (epub_files in
+    // config.ini, URL "/extepub/<idx>/book.epub") la chiave e' "extepub:<idx>"
+    // (stessa convenzione di /api/books e di _valid_book_key lato server);
+    // per gli altri .epub (static/) il basename.
     function bookKey() {
       if (isFolderBook()) return "ext";
-      // Toglie l'eventuale origine (es. https://books/): il backend si aspetta
-      // solo il nome del file .epub relativo a gBooksDir.
+      // FIX: external epubs (config.ini `epub_files`, served as
+      // "/extepub/<idx>/book.epub") must use the server-side key
+      // "extepub:<idx>" — the same convention /api/books and
+      // _valid_book_key() (Flask) use. Previously bookKey() returned the raw
+      // URL path "extepub/0/book.epub", which fails server validation:
+      // saves were silently rejected and, on reopen, the saved position was
+      // never found (reader always restarted at page 1). The regex below maps
+      // the URL back to the canonical key so both save and restore use the
+      // same book identifier.
+      var m = currentBookUrl.match(/^\/extepub\/(\d+)\/book\.epub$/);
+      if (m) return "extepub:" + m[1];
+      // Strip an optional origin (e.g. https://books/): the backend expects
+      // only the .epub basename relative to the static book directory.
       return currentBookUrl.replace(/^https?:\/\/[^/]+/i, "").replace(/^\//, "");
     }
 
