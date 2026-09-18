@@ -942,18 +942,18 @@ def list_books():
                     }
                 )
 
-    # 3) File .epub in static/
-    for name in sorted(os.listdir(STATIC_DIR)):
-        if name.lower().endswith(".epub"):
-            path = os.path.join(STATIC_DIR, name)
-            books.append(
-                {
-                    "name": name,
-                    "title": epub_title(path) or os.path.splitext(name)[0],
-                    "url": "/" + name,
-                    "size": os.path.getsize(path),
-                }
-            )
+    # 3) File .epub in static/ (commented out )
+    #for name in sorted(os.listdir(STATIC_DIR)):
+    #    if name.lower().endswith(".epub"):
+    #        path = os.path.join(STATIC_DIR, name)
+    #        books.append(
+    #            {
+    #                "name": name,
+    #                "title": epub_title(path) or os.path.splitext(name)[0],
+    #                "url": "/" + name,
+    #                "size": os.path.getsize(path),
+    #            }
+    #       )
     return jsonify(books)
 
 
