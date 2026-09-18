@@ -1,6 +1,5 @@
 # Epub.js v0.3 (Flask Fork)
 
-![FuturePress Views](http://fchasen.com/futurepress/fp.png)
 
 > **Fork notice:** This fork aims to serve the app with **Python Flask**. The library is used as the front-end rendering engine inside a Flask-based web application, allowing ePub documents to be displayed in the browser through a Python backend.
 
