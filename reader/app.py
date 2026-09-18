@@ -84,10 +84,12 @@ def _load_config():
 
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             config.write(f)
-
+        
+        epub_files_dir = config["paths"].get("epub_files_dir", "").strip()
         epub_files_raw = config["paths"].get("epub_files", "").strip()
+        #epub_files_dir usato solo se è valorizzato:
         epub_files = [
-            os.path.expanduser(p.strip())
+            os.path.expanduser(os.path.join(epub_files_dir, p.strip())) if epub_files_dir else os.path.expanduser(p.strip())
             for p in epub_files_raw.split(",")
             if p.strip()
         ]
