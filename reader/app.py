@@ -87,12 +87,26 @@ def _load_config():
         
         epub_files_dir = config["paths"].get("epub_files_dir", "").strip()
         epub_files_raw = config["paths"].get("epub_files", "").strip()
-        #epub_files_dir usato solo se è valorizzato:
-        epub_files = [
-            os.path.expanduser(os.path.join(epub_files_dir, p.strip())) if epub_files_dir else os.path.expanduser(p.strip())
-            for p in epub_files_raw.split(",")
-            if p.strip()
-        ]
+        # epub_files = *  → espande come glob tutti i .epub in epub_files_dir (o STATIC_DIR se assente)
+        if epub_files_raw == "*":
+            search_dir = epub_files_dir if epub_files_dir else STATIC_DIR
+            search_dir = os.path.expanduser(search_dir)
+            if os.path.isdir(search_dir):
+                epub_files = sorted(
+                    os.path.join(search_dir, f)
+                    for f in os.listdir(search_dir)
+                    if f.lower().endswith(".epub")
+                )
+            else:
+                epub_files = []
+                print(f"AVVISO: epub_files_dir non trovata: {search_dir}", file=sys.stderr)
+        else:
+            # elenco separato da virgole (comportamento originale)
+            epub_files = [
+                os.path.expanduser(os.path.join(epub_files_dir, p.strip())) if epub_files_dir else os.path.expanduser(p.strip())
+                for p in epub_files_raw.split(",")
+                if p.strip()
+            ]
 
         dropbox_sync_dir = os.path.expanduser(
             config["dropbox"].get("sync_dir", "").strip()
