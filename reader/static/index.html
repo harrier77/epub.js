@@ -1991,7 +1991,20 @@
     // element itself, so column pagination remains correct.
     // #viewer has overflow:auto, so zoomed content that exceeds the box
     // can be scrolled.
-    var readerZoom = 1, ZOOM_MIN = 0.75, ZOOM_MAX = 2, ZOOM_STEP = 0.25;
+    var readerZoom = 1, ZOOM_MIN = 0.75, ZOOM_MAX = 2;
+    // Livelli di zoom fissi: A+/A- ciclano tra questi valori (inclusi 110%, 115%, 120%).
+    var ZOOM_LEVELS = [0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20, 1.25, 1.30, 1.40, 1.50, 1.60, 1.75, 1.80, 1.90, 2.00];
+    function zoomIndex(z) {
+      for (var i = 0; i < ZOOM_LEVELS.length; i++) {
+        if (Math.abs(ZOOM_LEVELS[i] - z) < 0.005) return i;
+      }
+      return -1;
+    }
+    function applyZoomLevelIndex(idx) {
+      if (idx < 0) idx = 0;
+      if (idx >= ZOOM_LEVELS.length) idx = ZOOM_LEVELS.length - 1;
+      applyZoom(ZOOM_LEVELS[idx]);
+    }
     // ======================================================================
     // ZOOM HANDLER (FIX: search highlights break CFI-based navigation)
     // ======================================================================
@@ -2049,9 +2062,17 @@
         }
       });
     }
-    document.getElementById("zoomOut").addEventListener("click", function () { applyZoom(readerZoom - ZOOM_STEP); });
-    document.getElementById("zoomReset").addEventListener("click", function () { applyZoom(1); });
-    document.getElementById("zoomIn").addEventListener("click", function () { applyZoom(readerZoom + ZOOM_STEP); });
+    document.getElementById("zoomOut").addEventListener("click", function () {
+      var idx = zoomIndex(readerZoom);
+      if (idx > 0) applyZoomLevelIndex(idx - 1);
+    });
+    document.getElementById("zoomReset").addEventListener("click", function () {
+      applyZoom(1);
+    });
+    document.getElementById("zoomIn").addEventListener("click", function () {
+      var idx = zoomIndex(readerZoom);
+      if (idx < ZOOM_LEVELS.length - 1) applyZoomLevelIndex(idx + 1);
+    });
 
     // --- Tema di lettura: sfondo del testo (giallo pallido / nero con testo bianco) ---
     var bgThemes = {
