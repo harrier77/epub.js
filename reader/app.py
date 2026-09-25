@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 import zipfile
@@ -327,6 +328,24 @@ def rewrite_xhtml_css_links(text, chapter_dir, root):
 @app.route("/api/health")
 def health():
     return jsonify(status="ok")
+
+
+@app.route("/api/stop_windows", methods=["POST"])
+def stop_windows():
+    """Ferma il processo Flask, solo su Windows.
+
+    Il ritardo permette a Flask di inviare la risposta HTTP prima che il
+    processo venga terminato, evitando di dipendere da killall.bat.
+    """
+    if os.name != "nt" or sys.platform != "win32":
+        return jsonify(status="unsupported", error="Operazione disponibile solo su Windows"), 400
+
+    def stop_process():
+        time.sleep(0.25)
+        os._exit(0)
+
+    threading.Thread(target=stop_process, daemon=True).start()
+    return jsonify(status="stopping")
 
 
 # --- Controllo ortografico (hunspell it_IT, solo temporaneo nel DOM) ---

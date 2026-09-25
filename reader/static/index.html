@@ -993,6 +993,7 @@
     </select>
     <button id="bgYellowBtn" title="Sfondo giallo pallido per il testo" disabled style="padding:4px 8px;font-size:12px">G</button>
     <button id="bgBlackBtn" title="Sfondo nero con testo bianco" disabled style="padding:4px 8px;font-size:12px">N</button>
+    <button id="stopWindowsBtn" title="Ferma l'applicazione (solo Windows)" style="background:#7a3d3d">❌</button>
     
 <!--  </div> -->
 
@@ -1207,6 +1208,26 @@
         }, 3000);
       }
     }
+
+    // Ferma l'applicazione tramite l'endpoint locale Flask.
+    // Il controllo del sistema operativo viene fatto dal server: il browser
+    // non può eseguire direttamente un file .bat locale.
+    document.getElementById("stopWindowsBtn").addEventListener("click", function () {
+      if (!window.confirm("Ferma l'applicazione?")) return;
+      var button = this;
+      button.disabled = true;
+      fetch("/api/stop_windows", { method: "POST" })
+        .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+        .then(function (result) {
+          if (!result.ok) throw new Error(result.data.error || "Operazione non riuscita");
+          document.body.innerHTML =
+            "<p style='padding:2rem;font-family:system-ui'>Applicazione arrestata. Puoi chiudere questa pagina.</p>";
+        })
+        .catch(function (err) {
+          button.disabled = false;
+          setStatus("Impossibile fermare l'applicazione: " + err.message);
+        });
+    });
 
     // --- Libreria: sidebar sinistra ---
     function openLibrary() {
