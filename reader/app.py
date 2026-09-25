@@ -25,6 +25,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -159,6 +160,7 @@ FOLDER_BOOK_KEY = "ext"
 
 BOOK_DIR = None  # impostato da main() in base a --book-dir
 EPUB_FILES = None  # lista di path epub esterni da config.ini
+SERVER_PORT = 5000  # porta usata anche per delegare lo stop a epubstart.sh
 
 # Cache del bundle CSS (concatenazione di tutti gli styles/*.css): chiave =
 # max mtime dei file, cosi' se il translator rigenera i css il bundle si
@@ -330,21 +332,58 @@ def health():
     return jsonify(status="ok")
 
 
+def _is_termux():
+    """True se il processo Python e' in esecuzione dentro Termux."""
+    return (
+        "com.termux" in os.environ.get("PREFIX", "")
+        or "TERMUX_VERSION" in os.environ
+        or os.environ.get("TERMUX_APP_PID") is not None
+    )
+
+
 @app.route("/api/stop_windows", methods=["POST"])
 def stop_windows():
-    """Ferma il processo Flask, solo su Windows.
+    """Ferma il processo Flask su Windows o Termux.
 
-    Il ritardo permette a Flask di inviare la risposta HTTP prima che il
-    processo venga terminato, evitando di dipendere da killall.bat.
+    Su Windows il processo viene terminato direttamente. Su Termux viene
+    delegato a ~/epubstart.sh, che usa la stessa procedura dello stop manuale
+    e libera anche la porta. Il ritardo permette a Flask di inviare la
+    risposta HTTP prima che il server venga terminato.
     """
-    if os.name != "nt" or sys.platform != "win32":
-        return jsonify(status="unsupported", error="Operazione disponibile solo su Windows"), 400
+    if os.name == "nt" and sys.platform == "win32":
+        def stop_process():
+            time.sleep(0.25)
+            os._exit(0)
 
-    def stop_process():
+        threading.Thread(target=stop_process, daemon=True).start()
+        return jsonify(status="stopping")
+
+    if not _is_termux():
+        return jsonify(
+            status="unsupported",
+            error="Operazione disponibile solo su Windows o Termux",
+        ), 400
+
+    script = os.path.join(os.path.expanduser("~"), "epubstart.sh")
+    if not os.path.isfile(script):
+        return jsonify(
+            status="error",
+            error="epubstart.sh non trovato: " + script,
+        ), 500
+
+    def stop_termux():
         time.sleep(0.25)
-        os._exit(0)
+        try:
+            subprocess.run(
+                ["bash", script, "--stop", "--port", str(SERVER_PORT)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print("Errore durante lo stop Termux:", exc, file=sys.stderr)
 
-    threading.Thread(target=stop_process, daemon=True).start()
+    threading.Thread(target=stop_termux, daemon=True).start()
     return jsonify(status="stopping")
 
 
@@ -1216,7 +1255,7 @@ def ensure_sample_book():
 
 
 def main():
-    global BOOK_DIR, EPUB_FILES, DROPBOX_SYNC_DIR
+    global BOOK_DIR, EPUB_FILES, DROPBOX_SYNC_DIR, SERVER_PORT
     parser = argparse.ArgumentParser(description="Lettore EPUB con epub.js")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
@@ -1238,6 +1277,7 @@ def main():
     )
     args = parser.parse_args()
 
+    SERVER_PORT = args.port
     BOOK_DIR = (args.book_dir or "").strip() or None
     DROPBOX_SYNC_DIR = (args.dropbox_sync_dir or "").strip() or None
     EPUB_FILES = DEFAULT_EPUB_FILES if DEFAULT_EPUB_FILES else None
